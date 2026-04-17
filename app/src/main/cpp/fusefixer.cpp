@@ -88,6 +88,13 @@ constexpr std::string_view kIsPackageOwnedPathSymbols[] = {
     "_ZL21is_package_owned_pathRKNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEES7_",
 };
 
+constexpr std::string_view kContainsMountSymbols[] = {
+    "_ZN13mediaprovider4fuse13containsMountERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_"
+    "9allocatorIcEEEE",
+    "_ZN13mediaprovider4fuse13containsMountERKNSt3__112basic_stringIcNS1_11char_traitsIcEENS1_"
+    "9allocatorIcEEEE",
+};
+
 constexpr std::string_view kIsBpfBackingPathSymbols[] = {
     "_ZL19is_bpf_backing_pathRKNSt6__ndk112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEE",
     "_ZL19is_bpf_backing_pathRKNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEE",
@@ -2221,6 +2228,7 @@ std::optional<void*> ResolveTargetSymbolRuntime(const ModuleInfo& module,
 struct CoreHookStatus {
     bool appAccessible = false;
     bool packageOwned = false;
+    bool packageCoveredByComparePath = false;
     bool bpfBacking = false;
     bool strcasecmp = false;
     bool equalsIgnoreCase = false;
@@ -2232,12 +2240,29 @@ struct FileElfContext {
     ElfInfo elfInfo;
 };
 
-void RefreshCoreHookStatus(CoreHookStatus* status) {
+template <size_t N>
+bool HasResolvableSymbol(const ModuleInfo& module, const std::string_view (&symbols)[N]) {
+    const bool useRuntimeElf = module.path.find("!/") != std::string::npos;
+    for (const auto& symbol : symbols) {
+        auto resolved = useRuntimeElf ? ResolveTargetSymbolRuntime(module, symbol)
+                                      : ResolveTargetSymbol(module, symbol);
+        if (resolved.has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void RefreshCoreHookStatus(const ModuleInfo& module, CoreHookStatus* status) {
     if (status == nullptr) {
         return;
     }
     status->appAccessible = gOriginalIsAppAccessiblePath != nullptr;
-    status->packageOwned = gOriginalIsPackageOwnedPath != nullptr;
+    status->packageCoveredByComparePath =
+        gOriginalIsPackageOwnedPath == nullptr && gOriginalEqualsIgnoreCase != nullptr &&
+        gOriginalStrcasecmp != nullptr && HasResolvableSymbol(module, kContainsMountSymbols);
+    status->packageOwned =
+        gOriginalIsPackageOwnedPath != nullptr || status->packageCoveredByComparePath;
     status->bpfBacking = gOriginalIsBpfBackingPath != nullptr;
     status->strcasecmp = gOriginalStrcasecmp != nullptr;
     status->equalsIgnoreCase = gOriginalEqualsIgnoreCase != nullptr;
@@ -2250,9 +2275,11 @@ bool HasAllCoreHooks(const CoreHookStatus& status) {
 
 void LogCoreHookStatus(const char* stage, const CoreHookStatus& status) {
     __android_log_print(4, kLogTag,
-                        "%s core hooks app=%d package=%d bpf=%d strcasecmp=%d equals=%d", stage,
-                        status.appAccessible, status.packageOwned, status.bpfBacking,
-                        status.strcasecmp, status.equalsIgnoreCase);
+                        "%s core hooks app=%d package=%d package_compare=%d bpf=%d strcasecmp=%d "
+                        "equals=%d",
+                        stage, status.appAccessible, status.packageOwned,
+                        status.packageCoveredByComparePath, status.bpfBacking, status.strcasecmp,
+                        status.equalsIgnoreCase);
 }
 
 std::optional<FileElfContext> BuildFileElfContext(const ModuleInfo& module) {
@@ -2439,7 +2466,7 @@ void InstallMinimalCoreHooks(const ModuleInfo& module, const FileElfContext& fil
                                    reinterpret_cast<void*>(+WrappedEqualsIgnoreCaseAbi),
                                    &gOriginalEqualsIgnoreCase, "EqualsIgnoreCase");
 
-    RefreshCoreHookStatus(status);
+    RefreshCoreHookStatus(module, status);
 }
 
 void InstallMinimalDebugHooks(const ModuleInfo& module, const FileElfContext& fileContext) {
@@ -2526,7 +2553,7 @@ void InstallAdvancedCoreHooks(const ModuleInfo& module, CoreHookStatus* status) 
         }
     }
 
-    RefreshCoreHookStatus(status);
+    RefreshCoreHookStatus(module, status);
 }
 
 void InstallAdvancedDebugHooks(const ModuleInfo& module) {
@@ -2591,7 +2618,7 @@ void InstallFuseHooks() {
     }
 
     CoreHookStatus coreStatus;
-    RefreshCoreHookStatus(&coreStatus);
+    RefreshCoreHookStatus(*module, &coreStatus);
 
     if (!useRuntimeElf) {
         if (auto fileContext = BuildFileElfContext(*module); fileContext.has_value()) {
@@ -2615,12 +2642,15 @@ void InstallFuseHooks() {
         InstallAdvancedDebugHooks(*module);
     }
 
-    __android_log_print(4, kLogTag,
-                        "hook summary app=%p package=%p bpf=%p strcasecmp=%p equals=%p icu=%p",
-                        reinterpret_cast<void*>(gOriginalIsAppAccessiblePath),
-                        reinterpret_cast<void*>(gOriginalIsPackageOwnedPath),
-                        reinterpret_cast<void*>(gOriginalIsBpfBackingPath), gOriginalStrcasecmp,
-                        gOriginalEqualsIgnoreCase, reinterpret_cast<void*>(gUHasBinaryProperty));
+    __android_log_print(
+        4, kLogTag,
+        "hook summary app=%p package_ptr=%p package_compare=%d bpf=%p strcasecmp=%p equals=%p "
+        "icu=%p",
+        reinterpret_cast<void*>(gOriginalIsAppAccessiblePath),
+        reinterpret_cast<void*>(gOriginalIsPackageOwnedPath),
+        coreStatus.packageCoveredByComparePath, reinterpret_cast<void*>(gOriginalIsBpfBackingPath),
+        gOriginalStrcasecmp, gOriginalEqualsIgnoreCase,
+        reinterpret_cast<void*>(gUHasBinaryProperty));
 }
 
 // Entry points
