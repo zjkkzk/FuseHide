@@ -37,7 +37,7 @@ extern "C" {
 #include <unistd.h>
 #include <vector>
 
-// FUSE structures for debug hooks
+// Minimal FUSE wire structs used by the reply hooks below.
 struct fuse_session {};
 struct fuse_req {
     struct fuse_session* se;
@@ -89,8 +89,11 @@ namespace {
 
 constexpr const char* kLogTag = "FuseFixer";
 constexpr const char* kTargetLibrary = "libfuse_jni.so";
+// Visible storage roots that resolve to the same subtree on the current device build.
 constexpr std::string_view kVisibleStorageRoots[] = {"/storage/emulated/0"};
+// Root-level directory names that should be hidden under each visible storage root.
 constexpr std::string_view kHiddenRootEntryNames[] = {"xinhao"};
+// Package-based policy is easier to maintain than hardcoded runtime UIDs.
 constexpr std::string_view kHiddenPackages[] = {
     "com.eltavine.duckdetector",
     "io.github.xiaotong6666.fusefixer",
@@ -117,7 +120,7 @@ bool ShouldHideTestPath(uint32_t uid, std::string_view path);
 bool IsTrackedHiddenSubtreeInode(uint64_t ino);
 bool RemoveTrackedHiddenSubtreeInode(uint64_t ino);
 
-// Hook symbol names
+// Symbol spellings vary between libc++ and libstdc++ mangling, so keep both forms.
 
 constexpr std::string_view kIsAppAccessiblePathSymbols[] = {
     "_ZN13mediaprovider4fuseL22is_app_accessible_pathEP4fuseRKNSt6__ndk112basic_stringIcNS3_11char_"
@@ -160,15 +163,29 @@ using DirectoryEntries = std::vector<std::shared_ptr<mediaprovider::fuse::Direct
 using GetDirectoryEntriesFn = DirectoryEntries (*)(void* wrapper, uint32_t uid,
                                                    const std::string& path, DIR* dirp);
 
+// These RVAs are device-specific addresses from the reverse-engineered libfuse_jni.so.
+// InstallMinimalDebugHooks() and InstallAdvancedDebugHooks() use them only as a fallback when the
+// safer imported-symbol path is missing or the device build routes execution through internal
+// functions that are not exposed by name.
+// Reverse-engineered record: ShouldNotCache @ 0x0017dc64.
 constexpr uintptr_t kDeviceShouldNotCacheOffset = 0x0017dc64;
+// Reverse-engineered record: MediaProviderWrapper::GetDirectoryEntries @ 0x0018a3ec.
 constexpr uintptr_t kDeviceGetDirectoryEntriesOffset = 0x0018a3ec;
+// Reverse-engineered record: pf_mkdir @ 0x00177050.
 constexpr uintptr_t kDevicePfMkdirOffset = 0x00177050;
+// Reverse-engineered record: pf_mknod @ 0x00176ba8.
 constexpr uintptr_t kDevicePfMknodOffset = 0x00176ba8;
+// Reverse-engineered record: pf_unlink @ 0x00177534.
 constexpr uintptr_t kDevicePfUnlinkOffset = 0x00177534;
+// Reverse-engineered record: pf_rmdir @ 0x00177920.
 constexpr uintptr_t kDevicePfRmdirOffset = 0x00177920;
+// Reverse-engineered record: pf_create @ 0x0017a7c8.
 constexpr uintptr_t kDevicePfCreateOffset = 0x0017a7c8;
+// Reverse-engineered record: pf_readdir @ 0x00179c40.
 constexpr uintptr_t kDevicePfReaddirOffset = 0x00179c40;
+// Reverse-engineered record: pf_readdir_postfilter @ 0x00179cac.
 constexpr uintptr_t kDevicePfReaddirPostfilterOffset = 0x00179cac;
+// Reverse-engineered record: pf_readdirplus @ 0x0017b320.
 constexpr uintptr_t kDevicePfReaddirplusOffset = 0x0017b320;
 constexpr size_t kFuseEntryOutWireSize = 128;
 
@@ -372,6 +389,13 @@ bool IsHiddenPackageName(std::string_view packageName) {
     return false;
 }
 
+// Resolve uid -> packages inside the already-hooked MediaProvider process.
+// We intentionally stay inside the current process and ask PackageManager instead of adding
+// a separate framework hook in system_server. The injection entry point is Entry.java, which only
+// loads this library into MediaProvider, so currentApplication() is available here.
+// AOSP reference for the uid flowing into FUSE handlers: jni/FuseDaemon.cpp#1134 and #2121
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1134
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#2121
 JNIEnv* GetJniEnv(bool* didAttach) {
     if (didAttach != nullptr) {
         *didAttach = false;
@@ -396,6 +420,7 @@ JNIEnv* GetJniEnv(bool* didAttach) {
     return env;
 }
 
+// Query PackageManager once per uid and cache the result for hot FUSE paths.
 std::optional<bool> ResolveShouldHideUidWithPackageManager(uint32_t uid) {
     bool didAttach = false;
     JNIEnv* env = GetJniEnv(&didAttach);
@@ -531,7 +556,7 @@ bool IsDefaultIgnorableCodePoint(uint32_t cp) {
     return u_hasBinaryProperty(cp, kUCHAR_DEFAULT_IGNORABLE_CODE_POINT) != 0;
 }
 
-// Logging helpers — match original log format exactly
+// Logging helpers match the original log format closely enough to compare traces.
 
 // Escape for logging: printable ASCII as-is, else \xHH.
 // Original builds a std::string internally for the escaped form.
@@ -559,10 +584,9 @@ void LogInvalidUtf8(const uint8_t* data, size_t dataLen, size_t begin, size_t en
     __android_log_print(5, kLogTag, "invalid char at %zu-%zu : %s", begin, end, escaped.c_str());
 }
 
-// UTF-8 decoder — inline, matching the original's hand-rolled decoder
-// The original binary uses lookup tables at DAT_0010a21a and DAT_0010c3ac for
-// 3-byte and 4-byte sequence validation. We replicate the logic with explicit
-// range checks, which is equivalent.
+// Inline UTF-8 decoder that mirrors the hand-rolled logic seen in the device binary.
+// The reverse-engineered build validates 3-byte and 4-byte sequences through internal lookup
+// tables; here we express the same rules with explicit range checks.
 
 // Returns: true if a valid code point was decoded. Sets *cp and *width.
 // On failure, returns false. Caller decides how to handle invalid bytes.
@@ -697,9 +721,8 @@ size_t InvalidUtf8SpanEnd(const uint8_t* data, size_t len, size_t index) {
     return ((b3 ^ 0x80) < 0x40) ? next + 1 : next;
 }
 
-// NeedsSanitization
-// Checks if std::string contains any default-ignorable code point.
-// Original reads from the SSO std::string representation directly.
+// Checks whether the path contains any default-ignorable code point that the original
+// binary strips before comparing package-owned and app-accessible paths.
 
 bool NeedsSanitization(const std::string& input) {
     const auto* data = reinterpret_cast<const uint8_t*>(input.data());
@@ -710,12 +733,12 @@ bool NeedsSanitization(const std::string& input) {
         size_t width = 0;
 
         if (data[i] < 0x80) {
-            // ASCII — can never be default-ignorable
+            // ASCII code points are never default-ignorable.
             cp = data[i];
             width = 1;
         } else {
             if (!DecodeUtf8CodePoint(data, len, i, &cp, &width)) {
-                // Invalid UTF-8 — original returns 0 (not ignorable, skip)
+                // Invalid UTF-8 is treated as non-ignorable here, matching the device build.
                 return false;
             }
         }
@@ -728,13 +751,8 @@ bool NeedsSanitization(const std::string& input) {
     return false;
 }
 
-// RewriteString
-// Rewrites a std::string in-place, stripping default-ignorable code points.
-// Original operates on the std::string's internal buffer, copying non-ignorable
-// bytes forward with memmove-style logic, then truncating.
-// When invalid UTF-8 is encountered, it logs the ENTIRE original string with
-// "invalid char at %zu-%zu : %s" at level 5, then stops processing (leaves
-// invalid bytes in place).
+// Rewrites a string in place, stripping default-ignorable code points the same way the
+// device binary does before delegating to MediaProvider policy helpers.
 
 void RewriteString(std::string& input) {
     auto* data = reinterpret_cast<uint8_t*>(input.data());
@@ -779,16 +797,14 @@ void RewriteString(std::string& input) {
     }
 }
 
-// ASCII case-fold table — matches DAT_0010c2ac in the original binary
-// The original uses a 256-byte lookup table at DAT_0010c2ac for case folding.
-// For ASCII letters, tolower; for everything else, identity.
+// ASCII case folding matches the lookup-table behavior seen in the analyzed device binary.
 
 static char FoldAscii(uint8_t ch) {
     return static_cast<char>(std::tolower(ch));
 }
 
-// CompareCaseFoldIgnoringDefaultIgnorables
-// This is the core comparison function. The original's control flow:
+// This is the core comparison routine used by the sanitizing wrappers below.
+// The control flow mirrors the device binary's case-folding compare logic.
 //
 // Two indices (lhsIdx, rhsIdx) advance through (lhsData, lhsLen) and
 // (rhsData, rhsLen) respectively.
@@ -808,9 +824,8 @@ static char FoldAscii(uint8_t ch) {
 //   4. If one side runs out, check if the other side's remaining bytes are
 //      all default-ignorable. If so, equal. Otherwise, shorter side is less.
 //
-// The final return is: FoldAscii(lhs[lhsIdx]) - FoldAscii(rhs[rhsIdx])
-// (computed from the table lookup, matching the original's
-//  DAT_0010c2ac[lhs_byte] - DAT_0010c2ac[rhs_byte])
+// The final return is the byte-wise difference after ASCII folding, which matches the original
+// table-driven implementation.
 
 int CompareCaseFoldIgnoringDefaultIgnorables(const uint8_t* lhsData, size_t lhsLen,
                                              const uint8_t* rhsData, size_t rhsLen) {
@@ -829,7 +844,7 @@ int CompareCaseFoldIgnoringDefaultIgnorables(const uint8_t* lhsData, size_t lhsL
     rhsNextIdx = 0;
 
     while (true) {
-        // --- Advance lhs past ignorables ---
+        // Advance lhs past ignorable code points.
         while (lhsIdx == lhsNextIdx) {
             if (lhsIdx >= lhsLen)
                 goto tail_check;
@@ -857,7 +872,7 @@ int CompareCaseFoldIgnoringDefaultIgnorables(const uint8_t* lhsData, size_t lhsL
             lhsNextIdx = lhsIdx;
         }
 
-        // --- Advance rhs past ignorables ---
+        // Advance rhs past ignorable code points.
         while (rhsIdx == rhsNextIdx) {
             if (rhsIdx >= rhsLen)
                 goto tail_check;
@@ -882,7 +897,7 @@ int CompareCaseFoldIgnoringDefaultIgnorables(const uint8_t* lhsData, size_t lhsL
             rhsNextIdx = rhsIdx;
         }
 
-        // --- Compare current bytes (case-folded) ---
+        // Compare the current bytes after ASCII folding.
         {
             const uint8_t lhsByte = static_cast<uint8_t>(FoldAscii(lhsData[lhsIdx]));
             const uint8_t rhsByte = static_cast<uint8_t>(FoldAscii(rhsData[rhsIdx]));
@@ -953,8 +968,7 @@ tail_check:
     }
 
 final_compare:
-    // Original returns: DAT_0010c2ac[lhs_byte] - DAT_0010c2ac[rhs_byte]
-    // If both exhausted, both indices point past end, so we get 0.
+    // If both sides are exhausted, return equality. Otherwise return the folded byte difference.
     {
         const uint8_t lhsByte =
             (lhsIdx < lhsLen) ? static_cast<uint8_t>(FoldAscii(lhsData[lhsIdx])) : 0;
@@ -964,7 +978,7 @@ final_compare:
     }
 }
 
-// Debug hooks for FUSE daemon
+// Hook state for libfuse_jni.so running inside the MediaProvider process.
 void* gOriginalPfLookup = nullptr;
 void* gOriginalPfLookupPostfilter = nullptr;
 void* gOriginalPfAccess = nullptr;
@@ -1017,8 +1031,11 @@ uint32_t ReqUid(fuse_req_t req) {
     if (req == nullptr) {
         return 0;
     }
-    // The analyzed device build reads the caller uid from fuse_req + 0x3c in pf_getattr()
-    // and related handlers. This test-only helper mirrors that layout.
+    // The reverse-engineered device build reads req->ctx.uid from fuse_req + 0x3c in pf_getattr()
+    // and related handlers. AOSP accesses req->ctx.uid directly in C++, but our low-level hooks
+    // only receive the opaque request pointer, so this mirrors the verified device layout. AOSP
+    // reference: jni/FuseDaemon.cpp#2134 and #2145
+    // https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#2134
     return *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(req) + 0x3c);
 }
 
@@ -1028,6 +1045,8 @@ void RememberFuseSession(fuse_req_t req) {
     }
 }
 
+// Shared dentry cache is not scoped per uid. Once another app resolves the hidden entry, the
+// target uid can reuse that positive cache unless we actively invalidate the root dentry.
 void ScheduleHiddenEntryInvalidation() {
     auto notifyEntry =
         reinterpret_cast<int (*)(void*, uint64_t, const char*, size_t)>(gOriginalNotifyInvalEntry);
@@ -1056,6 +1075,7 @@ void ScheduleHiddenEntryInvalidation() {
     }).detach();
 }
 
+// Track subtree inodes so later getattr/readdir replies can also be forced uncached.
 void ScheduleHiddenInodeInvalidation(uint64_t ino) {
     auto notifyInode =
         reinterpret_cast<int (*)(void*, uint64_t, off_t, off_t)>(gOriginalNotifyInvalInode);
@@ -1097,6 +1117,8 @@ enum class HiddenNamedTargetKind {
     Descendant,
 };
 
+// Classify the current name-based operation as either the hidden root entry itself or a descendant
+// below a previously learned hidden subtree inode.
 HiddenNamedTargetKind ClassifyHiddenNamedTarget(uint32_t uid, uint64_t parent, const char* name) {
     if (!IsTestHiddenUid(uid) || name == nullptr) {
         return HiddenNamedTargetKind::None;
@@ -1129,6 +1151,13 @@ bool ReplyHiddenNamedTargetError(fuse_req_t req, const char* opName, HiddenNamed
     return true;
 }
 
+// Device reverse engineering shows make_node_entry() and create_handle_for_node() both consult
+// fuse->ShouldNotCache(path). Matching that behavior is what keeps positive dentries and file-cache
+// state from being reused across UIDs.
+// AOSP references: jni/FuseDaemon.cpp#347, #510, and #1428
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#347
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#510
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1428
 extern "C" bool WrappedShouldNotCache(void* fuse, const std::string& path) {
     if (IsAnyHiddenSubtreePath(path)) {
         DebugLogPrint(4, "force uncached subtree path=%s", DebugPreview(path).c_str());
@@ -1307,6 +1336,9 @@ bool BuildFilteredDirentplusPayload(const char* data, size_t size, uint32_t uid,
     return removed != 0;
 }
 
+// AOSP only decides dentry caching from the resolved path, not from uid policy.
+// Once the daemon sees any path inside the hidden subtree, force cache invalidation globally for
+// that subtree so positive dentries from other apps stop leaking into the target uid.
 void NoteHiddenSubtreePathForCache(std::string_view path) {
     if (!IsAnyHiddenSubtreePath(path)) {
         return;
@@ -1341,6 +1373,9 @@ void NoteHiddenSubtreePathForCache(std::string_view path) {
     }
 }
 
+// pf_lookup is the earliest reliable place to learn the real root parent inode on this device.
+// AOSP reference: jni/FuseDaemon.cpp#851
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#851
 extern "C" void WrappedPfLookup(fuse_req_t req, uint64_t parent, const char* name) {
     RememberFuseSession(req);
     if (name != nullptr && IsHiddenRootEntryName(name) && parent != 0) {
@@ -1368,6 +1403,11 @@ extern "C" void WrappedPfLookup(fuse_req_t req, uint64_t parent, const char* nam
     gTrackRootHiddenLookup = false;
 }
 
+// MediaProviderWrapper::GetDirectoryEntries() appends lower-fs directory names after the Java-side
+// list is fetched, so root entry hiding must also filter the native vector here.
+// AOSP references: jni/MediaProviderWrapper.cpp#373 and jni/FuseDaemon.cpp#1882
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/MediaProviderWrapper.cpp#373
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1882
 DirectoryEntries FilterHiddenDirectoryEntries(uint32_t uid, std::string_view parentPath,
                                               DirectoryEntries entries) {
     if (!IsTestHiddenUid(uid) || entries.empty()) {
@@ -1404,6 +1444,11 @@ DirectoryEntries WrappedGetDirectoryEntries(void* wrapper, uint32_t uid, const s
     return FilterHiddenDirectoryEntries(uid, path, std::move(entries));
 }
 
+// AOSP readdir postfilter stats each child path before copying the surviving dirents into a
+// fuse_read_out buffer. This context flag lets WrappedReplyBuf preserve that wire layout when the
+// device actually goes through pf_readdir_postfilter.
+// AOSP reference: jni/FuseDaemon.cpp#1954
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1954
 extern "C" void WrappedPfReaddirPostfilter(fuse_req_t req, uint64_t ino, uint32_t error_in,
                                            off_t off_in, off_t off_out, size_t size_out,
                                            const void* dirents_in, void* fi) {
@@ -1427,6 +1472,10 @@ extern "C" void WrappedPfReaddirPostfilter(fuse_req_t req, uint64_t ino, uint32_
     gInPfReaddirPostfilter = false;
 }
 
+// pf_lookup_postfilter is the AOSP path-specific ENOENT gate that runs after lookup success but
+// before the positive entry reaches the kernel.
+// AOSP reference: jni/FuseDaemon.cpp#921
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#921
 extern "C" void WrappedPfLookupPostfilter(fuse_req_t req, uint64_t parent, uint32_t error_in,
                                           const char* name, struct fuse_entry_out* feo,
                                           struct fuse_entry_bpf_out* febo) {
@@ -1479,6 +1528,9 @@ extern "C" void WrappedPfOpendir(fuse_req_t req, uint64_t ino, void* fi) {
     }
 }
 
+// AOSP pf_mkdir only checks parent_path accessibility before it calls mkdir(child_path), so a
+// hidden leaf name would still leak existence semantics unless we stop it here.
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1184
 extern "C" void WrappedPfMkdir(fuse_req_t req, uint64_t parent, const char* name, uint32_t mode) {
     RememberFuseSession(req);
     const HiddenNamedTargetKind kind = ClassifyHiddenNamedTarget(ReqUid(req), parent, name);
@@ -1492,6 +1544,9 @@ extern "C" void WrappedPfMkdir(fuse_req_t req, uint64_t parent, const char* name
     }
 }
 
+// Some callers create regular files through the mknod op instead of create. AOSP still uses only
+// parent_path policy here, so hidden leaf names must be blocked explicitly.
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1134
 extern "C" void WrappedPfMknod(fuse_req_t req, uint64_t parent, const char* name, uint32_t mode,
                                uint64_t rdev) {
     RememberFuseSession(req);
@@ -1530,6 +1585,9 @@ extern "C" void WrappedPfRmdir(fuse_req_t req, uint64_t parent, const char* name
     }
 }
 
+// AOSP pf_create inserts into MediaProvider and then opens the lower-fs child path. Returning a
+// positive entry here would let create leak EEXIST-like behavior for the hidden root entry.
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#2121
 extern "C" void WrappedPfCreate(fuse_req_t req, uint64_t parent, const char* name, uint32_t mode,
                                 void* fi) {
     RememberFuseSession(req);
@@ -1544,6 +1602,10 @@ extern "C" void WrappedPfCreate(fuse_req_t req, uint64_t parent, const char* nam
     }
 }
 
+// Plain readdir delegates to do_readdir_common(..., plus=false). Most modern devices keep
+// readdirplus enabled, but this hook is still useful as a fallback for alternative FUSE configs.
+// AOSP reference: jni/FuseDaemon.cpp#1944
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1944
 extern "C" void WrappedPfReaddir(fuse_req_t req, uint64_t ino, size_t size, off_t off, void* fi) {
     RememberFuseSession(req);
     const uint32_t uid = ReqUid(req);
@@ -1563,6 +1625,11 @@ extern "C" void WrappedPfReaddir(fuse_req_t req, uint64_t ino, size_t size, off_
     gInPfReaddir = false;
 }
 
+// readdirplus is the common enumeration path on recent Android builds because do_readdir_common()
+// emits fuse_direntplus records by first running do_lookup() for each directory entry.
+// AOSP references: jni/FuseDaemon.cpp#1904 and #2000
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1904
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#2000
 extern "C" void WrappedPfReaddirplus(fuse_req_t req, uint64_t ino, size_t size, off_t off,
                                      void* fi) {
     RememberFuseSession(req);
@@ -1604,6 +1671,13 @@ extern "C" int WrappedNotifyInvalInode(void* se, uint64_t ino, off_t off, off_t 
     return ret;
 }
 
+// This is the strongest uid-specific hiding point. Once a positive fuse_entry_param escapes here,
+// later operations such as getattr, getxattr, or create can still observe existence through the
+// resolved inode even if later path-based checks return false.
+// AOSP references: jni/FuseDaemon.cpp#912, #1166, and #1211
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#912
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1166
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1211
 extern "C" int WrappedReplyEntry(fuse_req_t req, const struct fuse_entry_param* e) {
     auto fn =
         reinterpret_cast<int (*)(fuse_req_t, const struct fuse_entry_param*)>(gOriginalReplyEntry);
@@ -1646,6 +1720,11 @@ extern "C" int WrappedReplyEntry(fuse_req_t req, const struct fuse_entry_param* 
     return ret;
 }
 
+// get_entry_timeout() only controls dentry caching; pf_getattr still replies with a separate
+// attr timeout. Force both to zero when the request touches the hidden subtree.
+// AOSP references: jni/FuseDaemon.cpp#510 and #1002
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#510
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1002
 extern "C" int WrappedReplyAttr(fuse_req_t req, const struct stat* attr, double timeout) {
     auto fn = reinterpret_cast<int (*)(fuse_req_t, const struct stat*, double)>(gOriginalReplyAttr);
     const double replyTimeout = gZeroAttrCacheForCurrentGetattr ? 0.0 : timeout;
@@ -1655,6 +1734,13 @@ extern "C" int WrappedReplyAttr(fuse_req_t req, const struct stat* attr, double 
     return fn ? fn(req, attr, replyTimeout) : -1;
 }
 
+// reply_buf is the last universal filtering point. AOSP emits directory data through plain readdir,
+// readdir postfilter, readdirplus, and lookup_postfilter using different wire layouts, so auto-
+// detecting dirent and direntplus records here is more reliable than betting on one upstream path.
+// AOSP references: jni/FuseDaemon.cpp#946, #1941, and #1997
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#946
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1941
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1997
 extern "C" int WrappedReplyBuf(fuse_req_t req, const char* buf, size_t size) {
     auto fn = reinterpret_cast<int (*)(fuse_req_t, const char*, size_t)>(gOriginalReplyBuf);
     const char* replyBuf = buf;
@@ -1784,6 +1870,13 @@ extern "C" void WrappedPfGetattr(fuse_req_t req, uint64_t ino, void* fi) {
     }
 }
 
+// lstat is the path-based source of truth used by pf_getattr and by some enumeration paths. This is
+// where we convert a visible subtree path back into cache invalidation state.
+// lstat is the path-based source of truth for pf_getattr and is also consulted by readdir
+// postfilter. Recording the root parent inode here avoids assuming a fixed root inode value.
+// AOSP references: jni/FuseDaemon.cpp#1002 and #1985
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1002
+// https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1985
 extern "C" int WrappedLstat(const char* path, struct stat* st) {
     const std::string_view pathView = path != nullptr ? std::string_view(path) : std::string_view();
     if (gInPfGetattr && gPfGetattrIno != 0 && IsHiddenRootDirectoryPath(pathView)) {
@@ -1831,6 +1924,8 @@ extern "C" int WrappedStat(const char* path, struct stat* st) {
     return -1;
 }
 
+// Even if the named FUSE wrappers are missed on a device-specific path, lower-fs mkdir/mknod/open
+// calls still carry the final child path. These libc hooks are the last fallback for create/mkdir.
 extern "C" int WrappedMkdirLibc(const char* path, mode_t mode) {
     const std::string_view pathView = path != nullptr ? std::string_view(path) : std::string_view();
     if (IsExactHiddenTargetPath(pathView)) {
@@ -1930,9 +2025,7 @@ bool ShouldHideTestPath(uint32_t uid, std::string_view path) {
     return IsTestHiddenUid(uid) && IsAnyHiddenSubtreePath(path);
 }
 
-// WrappedIsAppAccessiblePath
-// Original: check NeedsSanitization → if no, call original directly.
-// If yes: copy the string, RewriteString on the copy, call original with copy.
+// Mirror the original app-accessible gate: sanitize only when needed, then delegate.
 bool WrappedIsAppAccessiblePath(void* fuse, const std::string& path, uint32_t uid) {
     if (gOriginalIsAppAccessiblePath == nullptr) {
         return false;
@@ -1966,10 +2059,7 @@ bool WrappedIsAppAccessiblePath(void* fuse, const std::string& path, uint32_t ui
     return gOriginalIsAppAccessiblePath(fuse, sanitized, uid);
 }
 
-// WrappedIsPackageOwnedPath
-// Original: checks NeedsSanitization on FIRST param only (param_9, which is lhs).
-// If no need, calls original directly.
-// If needs sanitization: copy first param, rewrite it, call original with copy + original rhs.
+// The package-owned helper only sanitizes the first path argument on the device build.
 bool WrappedIsPackageOwnedPath(const std::string& lhs, const std::string& rhs) {
     if (gOriginalIsPackageOwnedPath == nullptr) {
         return false;
@@ -2012,8 +2102,7 @@ bool WrappedIsBpfBackingPath(const std::string& path) {
     return gOriginalIsBpfBackingPath(sanitized);
 }
 
-// WrappedStrcasecmp
-// Original: strlen both, then call CompareCaseFoldIgnoringDefaultIgnorables
+// Keep libc strcasecmp behavior aligned with the original case-folding compare.
 extern "C" int WrappedStrcasecmp(const char* lhs, const char* rhs) {
     const size_t lhsLen = (lhs != nullptr) ? std::strlen(lhs) : 0;
     const size_t rhsLen = (rhs != nullptr) ? std::strlen(rhs) : 0;
@@ -2028,7 +2117,7 @@ extern "C" int WrappedStrcasecmp(const char* lhs, const char* rhs) {
     return result;
 }
 
-// ABI wrapper for EqualsIgnoreCase — string_view is passed as (ptr, size) pairs
+// ABI adapter for android::base::EqualsIgnoreCase(string_view, string_view).
 extern "C" bool WrappedEqualsIgnoreCaseAbi(const char* lhsData, size_t lhsSize, const char* rhsData,
                                            size_t rhsSize) {
     const int result = CompareCaseFoldIgnoringDefaultIgnorables(
@@ -3520,6 +3609,8 @@ bool InstallHookForSymbol(std::string_view symbolName, void* replacement, void**
                : TryInstallFileInlineHook(*module, symbolName, replacement, backup, failureMessage);
 }
 
+// File-backed hooks are preferred first because they let us resolve internal symbols by name even
+// when the runtime ELF image is embedded inside an APK path.
 void InstallMinimalCoreHooks(const ModuleInfo& module, const FileElfContext& fileContext,
                              CoreHookStatus* status) {
     InstallFirstAvailableFileInlineHook(module, kIsAppAccessiblePathSymbols,
@@ -3551,6 +3642,8 @@ void InstallMinimalCoreHooks(const ModuleInfo& module, const FileElfContext& fil
     RefreshCoreHookStatus(module, status);
 }
 
+// These hooks cover reply helpers and libc fallbacks that are useful while validating cache and
+// enumeration behavior against the analyzed device binary.
 void InstallMinimalDebugHooks(const ModuleInfo& module, const FileElfContext& fileContext) {
     InstallFileCompareHookIfNeeded(
         fileContext.elfInfo, "fuse_lowlevel_notify_inval_entry", "fuse_lowlevel_notify_inval_entry",
@@ -3579,20 +3672,27 @@ void InstallMinimalDebugHooks(const ModuleInfo& module, const FileElfContext& fi
     InstallFileCompareHookIfNeeded(fileContext.elfInfo, "__open_2", "__open_2", (void*)WrappedOpen2,
                                    &gOriginalOpen2, "__open_2");
     if (gOriginalGetDirectoryEntries == nullptr) {
+        // This wrapper is a C++ member function and is not always reachable through imported symbol
+        // tables on the device build, so keep the direct RVA fallback.
         TryInstallInlineHookAt(
             reinterpret_cast<void*>(module.base + kDeviceGetDirectoryEntriesOffset),
             (void*)WrappedGetDirectoryEntries, &gOriginalGetDirectoryEntries,
             "hook GetDirectoryEntries failed");
     }
     if (gOriginalPfMkdir == nullptr) {
+        // mkdir policy lives in an internal static handler, so keep the device-specific offset as a
+        // backup when symbol-based lookup is unavailable.
         TryInstallInlineHookAt(reinterpret_cast<void*>(module.base + kDevicePfMkdirOffset),
                                (void*)WrappedPfMkdir, &gOriginalPfMkdir, "hook pf_mkdir failed");
     }
     if (gOriginalPfMknod == nullptr) {
+        // Some create paths go through pf_mknod instead of pf_create on device builds.
         TryInstallInlineHookAt(reinterpret_cast<void*>(module.base + kDevicePfMknodOffset),
                                (void*)WrappedPfMknod, &gOriginalPfMknod, "hook pf_mknod failed");
     }
     if (gOriginalPfUnlink == nullptr) {
+        // unlink/rmdir/create handlers are internal statics in libfuse_jni, so retain the verified
+        // offset fallback for devices that do not expose stable symbols.
         TryInstallInlineHookAt(reinterpret_cast<void*>(module.base + kDevicePfUnlinkOffset),
                                (void*)WrappedPfUnlink, &gOriginalPfUnlink, "hook pf_unlink failed");
     }
@@ -3605,6 +3705,8 @@ void InstallMinimalDebugHooks(const ModuleInfo& module, const FileElfContext& fi
                                (void*)WrappedPfCreate, &gOriginalPfCreate, "hook pf_create failed");
     }
     if (gOriginalPfReaddir == nullptr) {
+        // Directory enumeration behavior varies across device builds, so keep direct RVA hooks for
+        // readdir, readdirplus, and readdir_postfilter in addition to the reply_buf fallback.
         TryInstallInlineHookAt(reinterpret_cast<void*>(module.base + kDevicePfReaddirOffset),
                                (void*)WrappedPfReaddir, &gOriginalPfReaddir,
                                "hook pf_readdir failed");
@@ -3674,6 +3776,8 @@ void InstallMinimalDebugHooks(const ModuleInfo& module, const FileElfContext& fi
     }
 }
 
+// When file-backed symbol lookup is unavailable, fall back to runtime relocation patching and
+// verified device offsets recovered from the reverse-engineered libfuse_jni build.
 void InstallAdvancedCoreHooks(const ModuleInfo& module, CoreHookStatus* status) {
     if (!status->appAccessible) {
         InstallFirstAvailableInlineHook(kIsAppAccessiblePathSymbols,
@@ -3738,6 +3842,8 @@ void InstallAdvancedCoreHooks(const ModuleInfo& module, CoreHookStatus* status) 
     RefreshCoreHookStatus(module, status);
 }
 
+// Advanced debug hooks extend the minimal set with device-specific inline hooks for lookup, create,
+// readdir, and invalidation code paths that are not reliably exposed through imported symbols.
 void InstallAdvancedDebugHooks(const ModuleInfo& module) {
     if (!kEnableDebugHooks) {
         return;
@@ -3785,14 +3891,22 @@ void InstallAdvancedDebugHooks(const ModuleInfo& module) {
     }
 
     if (gOriginalGetDirectoryEntries == nullptr) {
+        // Keep the RVA fallback even after runtime relocation patching because this member function
+        // is not guaranteed to participate in imported relocation slots.
         TryInstallInlineHookAt(
             reinterpret_cast<void*>(module.base + kDeviceGetDirectoryEntriesOffset),
             (void*)WrappedGetDirectoryEntries, &gOriginalGetDirectoryEntries,
             "hook GetDirectoryEntries failed");
     }
     if (gOriginalPfMkdir == nullptr) {
+        // The advanced path still keeps explicit handler RVAs because these static functions may be
+        // absent from runtime relocation metadata.
         TryInstallInlineHookAt(reinterpret_cast<void*>(module.base + kDevicePfMkdirOffset),
                                (void*)WrappedPfMkdir, &gOriginalPfMkdir, "hook pf_mkdir failed");
+    }
+    if (gOriginalPfMknod == nullptr) {
+        TryInstallInlineHookAt(reinterpret_cast<void*>(module.base + kDevicePfMknodOffset),
+                               (void*)WrappedPfMknod, &gOriginalPfMknod, "hook pf_mknod failed");
     }
     if (gOriginalPfUnlink == nullptr) {
         TryInstallInlineHookAt(reinterpret_cast<void*>(module.base + kDevicePfUnlinkOffset),
@@ -3807,6 +3921,8 @@ void InstallAdvancedDebugHooks(const ModuleInfo& module) {
                                (void*)WrappedPfCreate, &gOriginalPfCreate, "hook pf_create failed");
     }
     if (gOriginalPfReaddir == nullptr) {
+        // These three offsets correspond to the internal enumeration handlers we validated in the
+        // reverse-engineered device binary.
         TryInstallInlineHookAt(reinterpret_cast<void*>(module.base + kDevicePfReaddirOffset),
                                (void*)WrappedPfReaddir, &gOriginalPfReaddir,
                                "hook pf_readdir failed");
@@ -3875,7 +3991,7 @@ void InstallAdvancedDebugHooks(const ModuleInfo& module) {
     }
 }
 
-// Main initialization — InstallFuseHooks
+// Install all hooks after LSPosed reports that libfuse_jni.so has been loaded into MediaProvider.
 
 void InstallFuseHooks() {
     auto module = FindTargetModule();
@@ -3928,7 +4044,7 @@ void InstallFuseHooks() {
         reinterpret_cast<void*>(gUHasBinaryProperty));
 }
 
-// Entry points
+// Native entry points exposed to JNI and the LSPosed native loader.
 
 extern "C" void PostNativeInit(const char* loadedLibrary, void*) {
     if (loadedLibrary == nullptr || std::strstr(loadedLibrary, kTargetLibrary) == nullptr) {
