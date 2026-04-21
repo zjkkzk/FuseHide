@@ -2,6 +2,33 @@
 
 namespace fusefixer {
 
+namespace {
+
+thread_local uint32_t gActiveCreateUid = 0;
+thread_local uint32_t gLastPathPolicyUid = 0;
+
+class ScopedCreateUid final {
+   public:
+    explicit ScopedCreateUid(uint32_t uid) : previous_(gActiveCreateUid) {
+        gActiveCreateUid = uid;
+    }
+
+    ~ScopedCreateUid() {
+        gActiveCreateUid = previous_;
+    }
+
+   private:
+    uint32_t previous_;
+};
+
+bool ShouldHideLowerFsCreatePath(std::string_view pathView) {
+    const uint32_t uid = gActiveCreateUid != 0 ? gActiveCreateUid : gLastPathPolicyUid;
+    return uid != 0 && HiddenPathPolicy::IsTestHiddenUid(uid) &&
+           HiddenPathPolicy::IsExactHiddenTargetPath(pathView);
+}
+
+}  // namespace
+
 // pf_lookup is the earliest reliable place to learn the real root parent inode on this device.
 // AOSP reference: jni/FuseDaemon.cpp#851
 // https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#851
@@ -160,14 +187,22 @@ extern "C" void WrappedPfOpendir(fuse_req_t req, uint64_t ino, void* fi) {
 // https://android.googlesource.com/platform/packages/providers/MediaProvider/+/refs/heads/android14-release/jni/FuseDaemon.cpp#1184
 extern "C" void WrappedPfMkdir(fuse_req_t req, uint64_t parent, const char* name, uint32_t mode) {
     RuntimeState::RememberFuseSession(req);
-    const HiddenNamedTargetKind kind =
-        ClassifyHiddenNamedTarget(RuntimeState::ReqUid(req), parent, name);
+    const uint32_t uid = RuntimeState::ReqUid(req);
+    const HiddenNamedTargetKind kind = ClassifyHiddenNamedTarget(uid, parent, name);
+    DebugLogPrint(4,
+                  "create-trace pf_mkdir uid=%u parent=%s name=%s mode=%o hidden_root=%d "
+                  "hidden_desc=%d",
+                  static_cast<unsigned>(uid), InodePath(parent).c_str(),
+                  name ? DebugPreview(name).c_str() : "null", mode,
+                  kind == HiddenNamedTargetKind::Root ? 1 : 0,
+                  kind == HiddenNamedTargetKind::Descendant ? 1 : 0);
     if (ReplyHiddenNamedTargetError(req, "pf_mkdir", kind, EACCES, ENOENT)) {
         return;
     }
     auto fn =
         reinterpret_cast<void (*)(fuse_req_t, uint64_t, const char*, uint32_t)>(gOriginalPfMkdir);
     if (fn) {
+        ScopedCreateUid scopedUid(uid);
         fn(req, parent, name, mode);
     }
 }
@@ -178,14 +213,23 @@ extern "C" void WrappedPfMkdir(fuse_req_t req, uint64_t parent, const char* name
 extern "C" void WrappedPfMknod(fuse_req_t req, uint64_t parent, const char* name, uint32_t mode,
                                uint64_t rdev) {
     RuntimeState::RememberFuseSession(req);
-    const HiddenNamedTargetKind kind =
-        ClassifyHiddenNamedTarget(RuntimeState::ReqUid(req), parent, name);
+    const uint32_t uid = RuntimeState::ReqUid(req);
+    const HiddenNamedTargetKind kind = ClassifyHiddenNamedTarget(uid, parent, name);
+    DebugLogPrint(4,
+                  "create-trace pf_mknod uid=%u parent=%s name=%s mode=%o rdev=%llu hidden_root=%d "
+                  "hidden_desc=%d",
+                  static_cast<unsigned>(uid), InodePath(parent).c_str(),
+                  name ? DebugPreview(name).c_str() : "null", mode,
+                  static_cast<unsigned long long>(rdev),
+                  kind == HiddenNamedTargetKind::Root ? 1 : 0,
+                  kind == HiddenNamedTargetKind::Descendant ? 1 : 0);
     if (ReplyHiddenNamedTargetError(req, "pf_mknod", kind, EPERM, ENOENT)) {
         return;
     }
     auto fn = reinterpret_cast<void (*)(fuse_req_t, uint64_t, const char*, uint32_t, uint64_t)>(
         gOriginalPfMknod);
     if (fn) {
+        ScopedCreateUid scopedUid(uid);
         fn(req, parent, name, mode, rdev);
     }
 }
@@ -259,14 +303,22 @@ extern "C" void WrappedPfRename(fuse_req_t req, uint64_t parent, const char* nam
 extern "C" void WrappedPfCreate(fuse_req_t req, uint64_t parent, const char* name, uint32_t mode,
                                 void* fi) {
     RuntimeState::RememberFuseSession(req);
-    const HiddenNamedTargetKind kind =
-        ClassifyHiddenNamedTarget(RuntimeState::ReqUid(req), parent, name);
+    const uint32_t uid = RuntimeState::ReqUid(req);
+    const HiddenNamedTargetKind kind = ClassifyHiddenNamedTarget(uid, parent, name);
+    DebugLogPrint(4,
+                  "create-trace pf_create uid=%u parent=%s name=%s mode=%o fi=%p hidden_root=%d "
+                  "hidden_desc=%d",
+                  static_cast<unsigned>(uid), InodePath(parent).c_str(),
+                  name ? DebugPreview(name).c_str() : "null", mode, fi,
+                  kind == HiddenNamedTargetKind::Root ? 1 : 0,
+                  kind == HiddenNamedTargetKind::Descendant ? 1 : 0);
     if (ReplyHiddenNamedTargetError(req, "pf_create", kind, EPERM, ENOENT)) {
         return;
     }
     auto fn = reinterpret_cast<void (*)(fuse_req_t, uint64_t, const char*, uint32_t, void*)>(
         gOriginalPfCreate);
     if (fn) {
+        ScopedCreateUid scopedUid(uid);
         fn(req, parent, name, mode, fi);
     }
 }
@@ -610,7 +662,11 @@ extern "C" int WrappedStat(const char* path, struct stat* st) {
 // calls still carry the final child path. These libc hooks are the last fallback for create/mkdir.
 extern "C" int WrappedMkdirLibc(const char* path, mode_t mode) {
     const std::string_view pathView = path != nullptr ? std::string_view(path) : std::string_view();
-    if (HiddenPathPolicy::IsExactHiddenTargetPath(pathView)) {
+    const uint32_t uid = gActiveCreateUid;
+    const bool hidden = ShouldHideLowerFsCreatePath(pathView);
+    DebugLogPrint(4, "create-trace lower_mkdir uid=%u path=%s mode=%o hidden=%d",
+                  static_cast<unsigned>(uid), DebugPreview(pathView).c_str(), mode, hidden ? 1 : 0);
+    if (hidden) {
         DebugLogPrint(4, "hide mkdir path=%s", DebugPreview(pathView).c_str());
         errno = EACCES;
         return -1;
@@ -625,7 +681,12 @@ extern "C" int WrappedMkdirLibc(const char* path, mode_t mode) {
 
 extern "C" int WrappedMknod(const char* path, mode_t mode, dev_t dev) {
     const std::string_view pathView = path != nullptr ? std::string_view(path) : std::string_view();
-    if (HiddenPathPolicy::IsExactHiddenTargetPath(pathView)) {
+    const uint32_t uid = gActiveCreateUid;
+    const bool hidden = ShouldHideLowerFsCreatePath(pathView);
+    DebugLogPrint(4, "create-trace lower_mknod uid=%u path=%s mode=%o dev=%llu hidden=%d",
+                  static_cast<unsigned>(uid), DebugPreview(pathView).c_str(), mode,
+                  static_cast<unsigned long long>(dev), hidden ? 1 : 0);
+    if (hidden) {
         DebugLogPrint(4, "hide mknod path=%s", DebugPreview(pathView).c_str());
         errno = EPERM;
         return -1;
@@ -647,7 +708,14 @@ extern "C" int WrappedOpen(const char* path, int flags, ...) {
         va_end(args);
     }
     const std::string_view pathView = path != nullptr ? std::string_view(path) : std::string_view();
-    if ((flags & O_CREAT) != 0 && HiddenPathPolicy::IsExactHiddenTargetPath(pathView)) {
+    const uint32_t uid = gActiveCreateUid;
+    const bool hidden = (flags & O_CREAT) != 0 && ShouldHideLowerFsCreatePath(pathView);
+    if ((flags & O_CREAT) != 0) {
+        DebugLogPrint(4, "create-trace lower_open uid=%u path=%s flags=0x%x mode=%o hidden=%d",
+                      static_cast<unsigned>(uid), DebugPreview(pathView).c_str(), flags, mode,
+                      hidden ? 1 : 0);
+    }
+    if (hidden) {
         DebugLogPrint(4, "hide open create path=%s flags=0x%x", DebugPreview(pathView).c_str(),
                       flags);
         errno = EPERM;
@@ -666,7 +734,14 @@ extern "C" int WrappedOpen(const char* path, int flags, ...) {
 
 extern "C" int WrappedOpen2(const char* path, int flags) {
     const std::string_view pathView = path != nullptr ? std::string_view(path) : std::string_view();
-    if ((flags & O_CREAT) != 0 && HiddenPathPolicy::IsExactHiddenTargetPath(pathView)) {
+    const uint32_t uid = gActiveCreateUid;
+    const bool hidden = (flags & O_CREAT) != 0 && ShouldHideLowerFsCreatePath(pathView);
+    if ((flags & O_CREAT) != 0) {
+        DebugLogPrint(4, "create-trace lower_open2 uid=%u path=%s flags=0x%x hidden=%d",
+                      static_cast<unsigned>(uid), DebugPreview(pathView).c_str(), flags,
+                      hidden ? 1 : 0);
+    }
+    if (hidden) {
         DebugLogPrint(4, "hide __open_2 create path=%s flags=0x%x", DebugPreview(pathView).c_str(),
                       flags);
         errno = EPERM;
@@ -718,6 +793,7 @@ bool WrappedIsAppAccessiblePath(void* fuse, const std::string& path, uint32_t ui
     if (gOriginalIsAppAccessiblePath == nullptr) {
         return false;
     }
+    gLastPathPolicyUid = uid;
     if (!UnicodePolicy::NeedsSanitization(path)) {
         UnicodePolicy::LogSuspiciousDirectPath("app_accessible", path);
         if (ShouldLogLimited(gAppAccessibleLogCount)) {
