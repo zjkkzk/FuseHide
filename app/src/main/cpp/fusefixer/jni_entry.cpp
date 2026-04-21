@@ -8,11 +8,108 @@ extern "C" void PostNativeInit(const char* loadedLibrary, void*) {
     fusefixer::InstallFuseHooks();
 }
 
+std::vector<std::string> JStringArrayToVector(JNIEnv* env, jobjectArray values) {
+    std::vector<std::string> out;
+    if (env == nullptr || values == nullptr) {
+        return out;
+    }
+    const jsize count = env->GetArrayLength(values);
+    out.reserve(static_cast<size_t>(count));
+    for (jsize i = 0; i < count; ++i) {
+        jstring value = static_cast<jstring>(env->GetObjectArrayElement(values, i));
+        if (value == nullptr) {
+            continue;
+        }
+        const char* chars = env->GetStringUTFChars(value, nullptr);
+        if (chars != nullptr) {
+            out.emplace_back(chars);
+            env->ReleaseStringUTFChars(value, chars);
+        }
+        env->DeleteLocalRef(value);
+    }
+    return out;
+}
+
+jobjectArray VectorToJavaStringArray(JNIEnv* env, const std::vector<std::string>& values) {
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray array =
+        env->NewObjectArray(static_cast<jsize>(values.size()), stringClass, nullptr);
+    for (jsize i = 0; i < static_cast<jsize>(values.size()); ++i) {
+        jstring value = env->NewStringUTF(values[static_cast<size_t>(i)].c_str());
+        env->SetObjectArrayElement(array, i, value);
+        env->DeleteLocalRef(value);
+    }
+    env->DeleteLocalRef(stringClass);
+    return array;
+}
+
 extern "C" {
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     fusefixer::gJavaVm = vm;
     return JNI_VERSION_1_6;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_github_xiaotong6666_fusefixer_HideConfigNativeBridge_getDefaultEnableHideAllRootEntries(
+    JNIEnv*, jclass) {
+    return fusefixer::DefaultHideConfig().enableHideAllRootEntries ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_io_github_xiaotong6666_fusefixer_HideConfigNativeBridge_getDefaultHideAllRootEntriesExemptions(
+    JNIEnv* env, jclass) {
+    return VectorToJavaStringArray(env,
+                                   fusefixer::DefaultHideConfig().hideAllRootEntriesExemptions);
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_io_github_xiaotong6666_fusefixer_HideConfigNativeBridge_getDefaultHiddenRootEntryNames(
+    JNIEnv* env, jclass) {
+    return VectorToJavaStringArray(env, fusefixer::DefaultHideConfig().hiddenRootEntryNames);
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_io_github_xiaotong6666_fusefixer_HideConfigNativeBridge_getDefaultHiddenPackages(JNIEnv* env,
+                                                                                      jclass) {
+    return VectorToJavaStringArray(env, fusefixer::DefaultHideConfig().hiddenPackages);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_github_xiaotong6666_fusefixer_HideConfigNativeBridge_getCurrentEnableHideAllRootEntries(
+    JNIEnv*, jclass) {
+    return fusefixer::CurrentHideConfig()->enableHideAllRootEntries ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_io_github_xiaotong6666_fusefixer_HideConfigNativeBridge_getCurrentHideAllRootEntriesExemptions(
+    JNIEnv* env, jclass) {
+    return VectorToJavaStringArray(env,
+                                   fusefixer::CurrentHideConfig()->hideAllRootEntriesExemptions);
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_io_github_xiaotong6666_fusefixer_HideConfigNativeBridge_getCurrentHiddenRootEntryNames(
+    JNIEnv* env, jclass) {
+    return VectorToJavaStringArray(env, fusefixer::CurrentHideConfig()->hiddenRootEntryNames);
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_io_github_xiaotong6666_fusefixer_HideConfigNativeBridge_getCurrentHiddenPackages(JNIEnv* env,
+                                                                                      jclass) {
+    return VectorToJavaStringArray(env, fusefixer::CurrentHideConfig()->hiddenPackages);
+}
+
+JNIEXPORT void JNICALL Java_io_github_xiaotong6666_fusefixer_HideConfigNativeBridge_applyHideConfig(
+    JNIEnv* env, jclass, jboolean enableHideAllRootEntries,
+    jobjectArray hideAllRootEntriesExemptions, jobjectArray hiddenRootEntryNames,
+    jobjectArray hiddenPackages) {
+    fusefixer::HideConfig config;
+    config.enableHideAllRootEntries = enableHideAllRootEntries == JNI_TRUE;
+    config.hideAllRootEntriesExemptions = JStringArrayToVector(env, hideAllRootEntriesExemptions);
+    config.hiddenRootEntryNames = JStringArrayToVector(env, hiddenRootEntryNames);
+    config.hiddenPackages = JStringArrayToVector(env, hiddenPackages);
+    fusefixer::ApplyHideConfig(std::move(config));
 }
 
 JNIEXPORT jint JNICALL Java_io_github_xiaotong6666_fusefixer_Utils_rmdir(JNIEnv* env, jclass clazz,

@@ -131,7 +131,8 @@ bool IsWildcardRootEntryCandidate(std::string_view name) {
     if (name.find('/') != std::string_view::npos) {
         return false;
     }
-    for (const auto& exemptEntry : kHideAllRootEntriesExemptions) {
+    const auto config = CurrentHideConfig();
+    for (const auto& exemptEntry : config->hideAllRootEntriesExemptions) {
         if (name == exemptEntry) {
             return false;
         }
@@ -141,8 +142,8 @@ bool IsWildcardRootEntryCandidate(std::string_view name) {
 
 bool ShouldHideWildcardRootEntryByParent(uint64_t parent, uint64_t rootParent,
                                          std::string_view name) {
-    return kEnableHideAllRootEntries && rootParent != 0 && parent == rootParent &&
-           IsWildcardRootEntryCandidate(name);
+    return CurrentHideConfig()->enableHideAllRootEntries && rootParent != 0 &&
+           parent == rootParent && IsWildcardRootEntryCandidate(name);
 }
 
 }  // namespace
@@ -185,12 +186,13 @@ void RuntimeState::ScheduleHiddenEntryInvalidation() {
     std::thread([notifyEntry, session]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         const uint64_t rootParent = gHiddenRootParentInode.load(std::memory_order_relaxed);
+        const auto config = CurrentHideConfig();
         std::unordered_set<std::string> namesToInvalidate;
-        for (const auto& rootEntryName : kHiddenRootEntryNames) {
+        for (const auto& rootEntryName : config->hiddenRootEntryNames) {
             namesToInvalidate.emplace(rootEntryName);
         }
 
-        if (kEnableHideAllRootEntries) {
+        if (config->enableHideAllRootEntries) {
             for (const auto& rootPath : kVisibleStorageRoots) {
                 DIR* dir = opendir(std::string(rootPath).c_str());
                 if (dir == nullptr) {
@@ -443,7 +445,8 @@ bool RemoveTrackedHiddenSubtreeInode(uint64_t ino) {
 }
 
 bool HiddenPathPolicy::IsConfiguredHiddenRootEntryName(std::string_view name) {
-    for (const auto& rootEntryName : kHiddenRootEntryNames) {
+    const auto config = CurrentHideConfig();
+    for (const auto& rootEntryName : config->hiddenRootEntryNames) {
         if (name == rootEntryName) {
             return true;
         }
@@ -459,7 +462,7 @@ bool HiddenPathPolicy::IsConfiguredHiddenRootEntryName(std::string_view name) {
     }
     UnicodePolicy::RewriteString(sanitized);
 
-    for (const auto& rootEntryName : kHiddenRootEntryNames) {
+    for (const auto& rootEntryName : config->hiddenRootEntryNames) {
         if (sanitized == rootEntryName) {
             return true;
         }
@@ -469,7 +472,7 @@ bool HiddenPathPolicy::IsConfiguredHiddenRootEntryName(std::string_view name) {
 
 bool HiddenPathPolicy::IsHiddenRootEntryName(std::string_view name) {
     return IsConfiguredHiddenRootEntryName(name) ||
-           (kEnableHideAllRootEntries && IsWildcardRootEntryCandidate(name));
+           (CurrentHideConfig()->enableHideAllRootEntries && IsWildcardRootEntryCandidate(name));
 }
 
 bool HiddenPathPolicy::IsAnyHiddenSubtreePath(std::string_view path) {

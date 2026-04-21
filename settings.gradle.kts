@@ -25,4 +25,3 @@ dependencyResolutionManagement {
 rootProject.name = "fusefixer"
 include(":app")
 include(":xposed-stubs")
- 

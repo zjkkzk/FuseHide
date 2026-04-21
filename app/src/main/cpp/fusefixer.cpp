@@ -22,17 +22,54 @@ std::atomic<int> gErrnoRemapLogCount{0};
 std::atomic<int> gSuspiciousDirectLogCount{0};
 std::mutex gUidHideCacheMutex;
 std::unordered_map<uint32_t, bool> gUidHideCache;
+std::shared_ptr<const HideConfig> gHideConfig = std::make_shared<HideConfig>(DefaultHideConfig());
 
-namespace {
+namespace {}  // namespace
+
+HideConfig DefaultHideConfig() {
+    HideConfig config;
+    config.enableHideAllRootEntries = kEnableHideAllRootEntries;
+    for (const auto& value : kHideAllRootEntriesExemptions) {
+        config.hideAllRootEntriesExemptions.emplace_back(value);
+    }
+    for (const auto& value : kHiddenRootEntryNames) {
+        config.hiddenRootEntryNames.emplace_back(value);
+    }
+    for (const auto& value : kHiddenPackages) {
+        config.hiddenPackages.emplace_back(value);
+    }
+    return config;
+}
+
+std::shared_ptr<const HideConfig> CurrentHideConfig() {
+    return std::atomic_load_explicit(&gHideConfig, std::memory_order_acquire);
+}
+
+void ApplyHideConfig(HideConfig config) {
+    auto next = std::make_shared<const HideConfig>(std::move(config));
+    std::atomic_store_explicit(&gHideConfig, std::move(next), std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(gUidHideCacheMutex);
+        gUidHideCache.clear();
+    }
+    DebugLogPrint(4, "applied hide config hide_all=%d exemptions=%zu roots=%zu packages=%zu",
+                  CurrentHideConfig()->enableHideAllRootEntries ? 1 : 0,
+                  CurrentHideConfig()->hideAllRootEntriesExemptions.size(),
+                  CurrentHideConfig()->hiddenRootEntryNames.size(),
+                  CurrentHideConfig()->hiddenPackages.size());
+}
 
 bool IsHiddenPackageName(std::string_view packageName) {
-    for (const auto& hiddenPackage : kHiddenPackages) {
+    const auto config = CurrentHideConfig();
+    for (const auto& hiddenPackage : config->hiddenPackages) {
         if (packageName == hiddenPackage) {
             return true;
         }
     }
     return false;
 }
+
+namespace {
 
 // Resolve uid -> packages inside the already-hooked MediaProvider process.
 // We intentionally stay inside the current process and ask PackageManager instead of adding

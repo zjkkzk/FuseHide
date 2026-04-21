@@ -1,0 +1,31 @@
+package io.github.xiaotong6666.fusefixer;
+
+public final class HideConfigNativeBridge {
+    static {
+        System.loadLibrary("fusefixer");
+    }
+
+    private HideConfigNativeBridge() {}
+
+    public static native boolean getDefaultEnableHideAllRootEntries();
+
+    public static native String[] getDefaultHideAllRootEntriesExemptions();
+
+    public static native String[] getDefaultHiddenRootEntryNames();
+
+    public static native String[] getDefaultHiddenPackages();
+
+    public static native boolean getCurrentEnableHideAllRootEntries();
+
+    public static native String[] getCurrentHideAllRootEntriesExemptions();
+
+    public static native String[] getCurrentHiddenRootEntryNames();
+
+    public static native String[] getCurrentHiddenPackages();
+
+    public static native void applyHideConfig(
+            boolean enableHideAllRootEntries,
+            String[] hideAllRootEntriesExemptions,
+            String[] hiddenRootEntryNames,
+            String[] hiddenPackages);
+}

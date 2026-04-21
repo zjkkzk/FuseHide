@@ -39,6 +39,11 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <provider
+            android:name="io.github.xiaotong6666.fusefixer.HideConfigProvider"
+            android:authorities="io.github.xiaotong6666.fusefixer.hideconfig"
+            android:exported="true" />
     </application>
 
 </manifest>

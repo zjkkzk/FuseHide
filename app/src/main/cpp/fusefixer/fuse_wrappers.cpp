@@ -566,7 +566,7 @@ extern "C" int WrappedLstat(const char* path, struct stat* st) {
                           InodePath(gPfGetattrIno).c_str(), DebugPreview(pathView).c_str());
         }
         RemoveTrackedHiddenSubtreeInode(gPfGetattrIno);
-        if (recorded && kEnableHideAllRootEntries) {
+        if (recorded && CurrentHideConfig()->enableHideAllRootEntries) {
             RuntimeState::ScheduleHiddenEntryInvalidation();
         }
     }

@@ -121,6 +121,13 @@ using DirectoryEntries = std::vector<std::shared_ptr<mediaprovider::fuse::Direct
 using GetDirectoryEntriesFn = DirectoryEntries (*)(void* wrapper, uint32_t uid,
                                                    const std::string& path, DIR* dirp);
 
+struct HideConfig {
+    bool enableHideAllRootEntries = false;
+    std::vector<std::string> hideAllRootEntriesExemptions;
+    std::vector<std::string> hiddenRootEntryNames;
+    std::vector<std::string> hiddenPackages;
+};
+
 // These RVAs are device-specific addresses from the reverse-engineered libfuse_jni.so.
 // The production device library we analyzed is stripped, so internal helpers such as
 // is_app_accessible_path and several pf_* handlers are not always recoverable by name from the
@@ -184,6 +191,7 @@ extern std::atomic<int> gErrnoRemapLogCount;
 extern std::atomic<int> gSuspiciousDirectLogCount;
 extern std::mutex gUidHideCacheMutex;
 extern std::unordered_map<uint32_t, bool> gUidHideCache;
+extern std::shared_ptr<const HideConfig> gHideConfig;
 
 inline bool ShouldLogLimited(std::atomic<int>& counter, int limit = 8) {
     const int old = counter.fetch_add(1, std::memory_order_relaxed);
@@ -198,6 +206,10 @@ inline void DebugLogPrint(int priority, const char* fmt, Args... args) {
 }
 
 std::optional<bool> ResolveShouldHideUidWithPackageManager(uint32_t uid);
+HideConfig DefaultHideConfig();
+std::shared_ptr<const HideConfig> CurrentHideConfig();
+void ApplyHideConfig(HideConfig config);
+bool IsHiddenPackageName(std::string_view packageName);
 
 class UnicodePolicy final {
    public:
