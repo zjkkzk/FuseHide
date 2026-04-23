@@ -116,7 +116,9 @@ std::mutex gPendingReaddirContextsMutex;
 std::unordered_map<uint64_t, PendingReaddirContext> gPendingReaddirContexts;
 std::mutex gRecentHiddenParentPathsMutex;
 std::unordered_map<uint32_t, std::string> gRecentHiddenParentPaths;
+std::unordered_map<uint32_t, uint32_t> gRecentHiddenParentPathUids;
 std::string gRecentHiddenParentPathAnyUid;
+uint32_t gRecentHiddenParentPathAnyUidOwner = 0;
 std::mutex gUidErrRemapMutex;
 
 struct UidErrRemapState {
@@ -342,7 +344,11 @@ bool IsHiddenLookupTarget(uint32_t uid, uint64_t parent, uint32_t error_in, cons
     if (!IsTestHiddenUid(uid) || error_in != 0 || name == nullptr) {
         return false;
     }
-    return IsHiddenLookupCacheTarget(parent, name);
+    if (IsHiddenLookupCacheTarget(parent, name)) {
+        return true;
+    }
+    const auto kind = ClassifyHiddenNamedTarget(uid, parent, name);
+    return kind == HiddenNamedTargetKind::Root || kind == HiddenNamedTargetKind::Descendant;
 }
 
 bool IsHiddenLookupCacheTarget(uint64_t parent, const char* name) {
@@ -580,6 +586,23 @@ std::optional<std::string> LookupTrackedPathForInode(uint64_t ino) {
     return it->second;
 }
 
+std::optional<uint64_t> LookupTrackedInodeForPath(std::string_view path) {
+    if (path.empty()) {
+        return std::nullopt;
+    }
+    const uint64_t rootParent = gHiddenRootParentInode.load(std::memory_order_relaxed);
+    if (rootParent != 0 && path == kVisibleStorageRoots[0]) {
+        return rootParent;
+    }
+    std::lock_guard<std::mutex> lock(gInodePathCacheMutex);
+    for (const auto& [ino, trackedPath] : gInodePathCache) {
+        if (trackedPath == path) {
+            return ino;
+        }
+    }
+    return std::nullopt;
+}
+
 void RememberTrackedPathForInode(uint64_t ino, std::string_view path) {
     if (ino == 0 || path.empty()) {
         return;
@@ -594,21 +617,31 @@ void RememberRecentHiddenParentPath(uint32_t uid, std::string_view path) {
     }
     std::lock_guard<std::mutex> lock(gRecentHiddenParentPathsMutex);
     gRecentHiddenParentPathAnyUid = std::string(path);
+    gRecentHiddenParentPathAnyUidOwner = uid;
     if (uid != 0) {
         gRecentHiddenParentPaths[uid] = gRecentHiddenParentPathAnyUid;
+        gRecentHiddenParentPathUids[uid] = uid;
     }
 }
 
-std::optional<std::string> LookupRecentHiddenParentPath(uint32_t uid) {
+std::optional<std::string> LookupRecentHiddenParentPath(uint32_t uid, uint32_t* matchedHiddenUid) {
     std::lock_guard<std::mutex> lock(gRecentHiddenParentPathsMutex);
     if (uid != 0) {
         const auto it = gRecentHiddenParentPaths.find(uid);
         if (it != gRecentHiddenParentPaths.end()) {
+            if (matchedHiddenUid != nullptr) {
+                const auto uidIt = gRecentHiddenParentPathUids.find(uid);
+                *matchedHiddenUid =
+                    uidIt != gRecentHiddenParentPathUids.end() ? uidIt->second : uid;
+            }
             return it->second;
         }
     }
     if (gRecentHiddenParentPathAnyUid.empty()) {
         return std::nullopt;
+    }
+    if (matchedHiddenUid != nullptr) {
+        *matchedHiddenUid = gRecentHiddenParentPathAnyUidOwner;
     }
     return gRecentHiddenParentPathAnyUid;
 }
@@ -617,8 +650,12 @@ void ClearRecentHiddenParentPath(uint32_t uid) {
     std::lock_guard<std::mutex> lock(gRecentHiddenParentPathsMutex);
     if (uid != 0) {
         gRecentHiddenParentPaths.erase(uid);
+        gRecentHiddenParentPathUids.erase(uid);
     }
-    gRecentHiddenParentPathAnyUid.clear();
+    if (uid == 0 || uid == gRecentHiddenParentPathAnyUidOwner) {
+        gRecentHiddenParentPathAnyUid.clear();
+        gRecentHiddenParentPathAnyUidOwner = 0;
+    }
 }
 
 bool HiddenPathPolicy::IsConfiguredHiddenRootEntryName(std::string_view name) {
@@ -853,7 +890,8 @@ bool DirentFilter::BuildFilteredDirentPayload(const char* data, size_t size, uin
 
 bool BuildFilteredDirentPayloadForParentPath(const char* data, size_t size, uint32_t uid,
                                              std::string_view parentPath, std::vector<char>* out,
-                                             size_t* removedCount) {
+                                             size_t* removedCount,
+                                             std::vector<FilteredDirentMatch>* removedEntries) {
     if (data == nullptr || size == 0 || out == nullptr || removedCount == nullptr ||
         parentPath.empty()) {
         return false;
@@ -872,6 +910,9 @@ bool BuildFilteredDirentPayloadForParentPath(const char* data, size_t size, uint
         const std::string_view name(dirent->name, dirent->namelen);
         if (ShouldFilterDirentForParentPath(uid, parentPath, dirent->ino, name)) {
             removed++;
+            if (removedEntries != nullptr) {
+                removedEntries->push_back(FilteredDirentMatch{std::string(name), dirent->ino});
+            }
         } else {
             out->insert(out->end(), data + offset, data + offset + recordSize);
         }
@@ -920,7 +961,8 @@ bool DirentFilter::BuildFilteredDirentplusPayload(const char* data, size_t size,
 
 bool BuildFilteredDirentplusPayloadForParentPath(const char* data, size_t size, uint32_t uid,
                                                  std::string_view parentPath,
-                                                 std::vector<char>* out, size_t* removedCount) {
+                                                 std::vector<char>* out, size_t* removedCount,
+                                                 std::vector<FilteredDirentMatch>* removedEntries) {
     if (data == nullptr || size == 0 || out == nullptr || removedCount == nullptr ||
         parentPath.empty()) {
         return false;
@@ -940,6 +982,9 @@ bool BuildFilteredDirentplusPayloadForParentPath(const char* data, size_t size, 
         const std::string_view name(dirent->name, dirent->namelen);
         if (ShouldFilterDirentForParentPath(uid, parentPath, dirent->ino, name)) {
             removed++;
+            if (removedEntries != nullptr) {
+                removedEntries->push_back(FilteredDirentMatch{std::string(name), dirent->ino});
+            }
         } else {
             out->insert(out->end(), data + offset, data + offset + recordSize);
         }

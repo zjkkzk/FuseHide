@@ -133,52 +133,133 @@ struct HideConfig {
     std::vector<std::string> hiddenPackages;
 };
 
-// These RVAs are device-specific addresses from the reverse-engineered libfuse_jni.so.
+// These RVAs are device-specific addresses from reverse-engineered libfuse_jni.so builds.
 // The production device library we analyzed is stripped, so internal helpers such as
 // is_app_accessible_path and several pf_* handlers are not always recoverable by name from the
-// shipped ELF. Keep these offsets only as a last resort for this exact build when symbol-based
-// resolution fails.
-// Reverse-engineered record: is_app_accessible_path @ 0x0017bb5c.
-inline constexpr uintptr_t kDeviceIsAppAccessiblePathOffset = 0x0017bb5c;
-// Reverse-engineered record: pf_lookup @ 0x00175e48.
-inline constexpr uintptr_t kDevicePfLookupOffset = 0x00175e48;
-// Reverse-engineered record: pf_lookup_postfilter @ 0x00175f90.
-inline constexpr uintptr_t kDevicePfLookupPostfilterOffset = 0x00175f90;
-// Reverse-engineered record: pf_getattr @ 0x001762bc.
-inline constexpr uintptr_t kDevicePfGetattrOffset = 0x001762bc;
-// Reverse-engineered record: ShouldNotCache @ 0x0017dc64.
-inline constexpr uintptr_t kDeviceShouldNotCacheOffset = 0x0017dc64;
-// Reverse-engineered record: do_readdir_common @ 0x0018036c.
-// This is the shared enumeration core that builds the parent path, fetches directory entries,
-// and finally replies through fuse_reply_buf.
-inline constexpr uintptr_t kDeviceDoReaddirCommonOffset = 0x0018036c;
-// Reverse-engineered record: MediaProviderWrapper::GetDirectoryEntries thunk @ 0x001fd6b0.
-// do_readdir_common calls this thunk on the analyzed device build; hooking only the concrete body
-// at 0x0018a3ec is not sufficient when callers go through the thunk entry.
-inline constexpr uintptr_t kDeviceGetDirectoryEntriesOffset = 0x001fd6b0;
-// Reverse-engineered record: addDirectoryEntriesFromLowerFs body @ 0x0018be00.
-// GetDirectoryEntries() calls this body directly on the analyzed device build.
-inline constexpr uintptr_t kDeviceAddDirectoryEntriesFromLowerFsOffset = 0x0018be00;
-// External thunk/entry for the same helper on this build.
-inline constexpr uintptr_t kDeviceAddDirectoryEntriesFromLowerFsThunkOffset = 0x001fdcf8;
-// Reverse-engineered record: pf_mkdir @ 0x00177050.
-inline constexpr uintptr_t kDevicePfMkdirOffset = 0x00177050;
-// Reverse-engineered record: pf_mknod @ 0x00176ba8.
-inline constexpr uintptr_t kDevicePfMknodOffset = 0x00176ba8;
-// Reverse-engineered record: pf_unlink @ 0x00177534.
-inline constexpr uintptr_t kDevicePfUnlinkOffset = 0x00177534;
-// Reverse-engineered record: pf_rmdir @ 0x00177920.
-inline constexpr uintptr_t kDevicePfRmdirOffset = 0x00177920;
-// Reverse-engineered record: pf_rename @ 0x00177ef4.
-inline constexpr uintptr_t kDevicePfRenameOffset = 0x00177ef4;
-// Reverse-engineered record: pf_create @ 0x0017a7c8.
-inline constexpr uintptr_t kDevicePfCreateOffset = 0x0017a7c8;
-// Reverse-engineered record: pf_readdir @ 0x00179c40.
-inline constexpr uintptr_t kDevicePfReaddirOffset = 0x00179c40;
-// Reverse-engineered record: pf_readdir_postfilter @ 0x00179cac.
-inline constexpr uintptr_t kDevicePfReaddirPostfilterOffset = 0x00179cac;
-// Reverse-engineered record: pf_readdirplus @ 0x0017b320.
-inline constexpr uintptr_t kDevicePfReaddirplusOffset = 0x0017b320;
+// shipped ELF. Keep these offsets only as a last resort after symbol-based lookup fails, and
+// select among known profiles at runtime instead of baking one device's layout globally.
+struct DeviceHookProfile {
+    const char* name;
+    uintptr_t isAppAccessiblePathOffset;
+    uintptr_t pfLookupOffset;
+    uintptr_t pfLookupPostfilterOffset;
+    uintptr_t pfGetattrOffset;
+    uintptr_t shouldNotCacheOffset;
+    uintptr_t doReaddirCommonOffset;
+    uintptr_t getDirectoryEntriesOffset;
+    uintptr_t addDirectoryEntriesFromLowerFsOffset;
+    uintptr_t addDirectoryEntriesFromLowerFsThunkOffset;
+    uintptr_t pfMkdirOffset;
+    uintptr_t pfMknodOffset;
+    uintptr_t pfUnlinkOffset;
+    uintptr_t pfRmdirOffset;
+    uintptr_t pfRenameOffset;
+    uintptr_t pfCreateOffset;
+    uintptr_t pfReaddirOffset;
+    uintptr_t pfReaddirPostfilterOffset;
+    uintptr_t pfReaddirplusOffset;
+};
+
+// Reverse-engineered record: ShouldNotCache @ 0x0017dc64, do_readdir_common @ 0x0018036c,
+// GetDirectoryEntries @ 0x0018a3ec, addDirectoryEntriesFromLowerFs @ 0x0018be00,
+// thunk @ 0x001fdcf8 in Ghidra with image base 0x00100000.
+inline constexpr DeviceHookProfile kDeviceHookProfileLegacy = {
+    .name = "legacy_device",
+    .isAppAccessiblePathOffset = 0x0007bb5c,
+    .pfLookupOffset = 0x00075e48,
+    .pfLookupPostfilterOffset = 0x00075f90,
+    .pfGetattrOffset = 0x000762bc,
+    .shouldNotCacheOffset = 0x0007dc64,
+    .doReaddirCommonOffset = 0x0008036c,
+    .getDirectoryEntriesOffset = 0x0008a3ec,
+    .addDirectoryEntriesFromLowerFsOffset = 0x0008be00,
+    .addDirectoryEntriesFromLowerFsThunkOffset = 0x000fdcf8,
+    .pfMkdirOffset = 0x00077050,
+    .pfMknodOffset = 0x00076ba8,
+    .pfUnlinkOffset = 0x00077534,
+    .pfRmdirOffset = 0x00077920,
+    .pfRenameOffset = 0x00077ef4,
+    .pfCreateOffset = 0x0007a7c8,
+    .pfReaddirOffset = 0x00079c40,
+    .pfReaddirPostfilterOffset = 0x00079cac,
+    .pfReaddirplusOffset = 0x0007b320,
+};
+
+// Reverse-engineered record: ShouldNotCache @ 0x001eb658, do_readdir_common @ 0x001ee694,
+// GetDirectoryEntries @ 0x001f8838, addDirectoryEntriesFromLowerFs @ 0x001fa180,
+// thunk @ 0x002073d0 in Ghidra with image base 0x00100000.
+inline constexpr DeviceHookProfile kDeviceHookProfileBp2a = {
+    .name = "bp2a_device",
+    .isAppAccessiblePathOffset = 0x000e9b94,
+    .pfLookupOffset = 0x000e3f94,
+    .pfLookupPostfilterOffset = 0x000e40e4,
+    .pfGetattrOffset = 0x000e4418,
+    .shouldNotCacheOffset = 0x000eb658,
+    .doReaddirCommonOffset = 0x000ee694,
+    .getDirectoryEntriesOffset = 0x000f8838,
+    .addDirectoryEntriesFromLowerFsOffset = 0x000fa180,
+    .addDirectoryEntriesFromLowerFsThunkOffset = 0x001073d0,
+    .pfMkdirOffset = 0x000e5250,
+    .pfMknodOffset = 0x000e4d80,
+    .pfUnlinkOffset = 0x000e573c,
+    .pfRmdirOffset = 0x000e5b64,
+    .pfRenameOffset = 0x000e60b0,
+    .pfCreateOffset = 0x000e8890,
+    .pfReaddirOffset = 0x000e7aa0,
+    .pfReaddirPostfilterOffset = 0x000e7b0c,
+    .pfReaddirplusOffset = 0x000e93c4,
+};
+
+inline constexpr DeviceHookProfile kDeviceHookProfileV3 = {
+    .name = "v3_device",
+    .isAppAccessiblePathOffset = 0x000e9df8,
+    .pfLookupOffset = 0x000e3f18,
+    .pfLookupPostfilterOffset = 0x000e4068,
+    .pfGetattrOffset = 0x000e43a8,
+    .shouldNotCacheOffset = 0x000eb96c,
+    .doReaddirCommonOffset = 0x000ee9fc,
+    .getDirectoryEntriesOffset = 0x000f8cac,
+    .addDirectoryEntriesFromLowerFsOffset = 0x000fa5f4,
+    .addDirectoryEntriesFromLowerFsThunkOffset = 0x001077e0,
+    .pfMkdirOffset = 0x000e521c,
+    .pfMknodOffset = 0x000e4d40,
+    .pfUnlinkOffset = 0x000e5714,
+    .pfRmdirOffset = 0x000e5b4c,
+    .pfRenameOffset = 0x000e60cc,
+    .pfCreateOffset = 0x000e8acc,
+    .pfReaddirOffset = 0x000e7cb8,
+    .pfReaddirPostfilterOffset = 0x000e7d24,
+    .pfReaddirplusOffset = 0x000e961c,
+};
+
+inline constexpr DeviceHookProfile kDeviceHookProfileV6 = {
+    .name = "v6_device",
+    .isAppAccessiblePathOffset = 0x000e7620,
+    .pfLookupOffset = 0x000e1aec,
+    .pfLookupPostfilterOffset = 0x000e1c3c,
+    .pfGetattrOffset = 0x000e1f70,
+    .shouldNotCacheOffset = 0x000ec724,
+    .doReaddirCommonOffset = 0x000ef6f4,
+    .getDirectoryEntriesOffset = 0x000f9b98,
+    .addDirectoryEntriesFromLowerFsOffset = 0x000fb488,
+    .addDirectoryEntriesFromLowerFsThunkOffset = 0x001086f8,
+    .pfMkdirOffset = 0x000e2d7c,
+    .pfMknodOffset = 0x000e28d8,
+    .pfUnlinkOffset = 0x000e323c,
+    .pfRmdirOffset = 0x000e3640,
+    .pfRenameOffset = 0x000e3b8c,
+    .pfCreateOffset = 0x000e635c,
+    .pfReaddirOffset = 0x000e557c,
+    .pfReaddirPostfilterOffset = 0x000e55e8,
+    .pfReaddirplusOffset = 0x000e6e84,
+};
+
+inline constexpr DeviceHookProfile kKnownDeviceHookProfiles[] = {
+    kDeviceHookProfileLegacy,
+    kDeviceHookProfileBp2a,
+    kDeviceHookProfileV3,
+    kDeviceHookProfileV6,
+};
 inline constexpr size_t kFuseEntryOutWireSize = 128;
 
 struct NativeApiEntries {
@@ -353,12 +434,19 @@ struct PendingReaddirContext {
     uint64_t ino = 0;
     std::string path;
 };
+
+struct FilteredDirentMatch {
+    std::string name;
+    uint64_t ino = 0;
+};
 extern std::mutex gPendingReaddirContextsMutex;
 extern std::unordered_map<uint64_t, PendingReaddirContext> gPendingReaddirContexts;
 extern thread_local uint64_t gCurrentReaddirReqUnique;
 extern std::mutex gRecentHiddenParentPathsMutex;
 extern std::unordered_map<uint32_t, std::string> gRecentHiddenParentPaths;
+extern std::unordered_map<uint32_t, uint32_t> gRecentHiddenParentPathUids;
 extern std::string gRecentHiddenParentPathAnyUid;
+extern uint32_t gRecentHiddenParentPathAnyUidOwner;
 
 namespace ReplyErrorBridge {
 // Use Original() only when preserving strict "hook backup only" semantics for a wrapper that
@@ -399,6 +487,7 @@ bool IsHiddenRootEntryName(std::string_view name);
 bool IsAnyHiddenSubtreePath(std::string_view path);
 bool IsExactHiddenTargetPath(std::string_view path);
 std::optional<std::string> LookupTrackedPathForInode(uint64_t ino);
+std::optional<uint64_t> LookupTrackedInodeForPath(std::string_view path);
 void RememberTrackedPathForInode(uint64_t ino, std::string_view path);
 bool IsHiddenRootDirectoryPath(std::string_view path);
 bool IsParentOfExactHiddenTargetPath(std::string_view path);
@@ -411,18 +500,21 @@ bool ShouldFilterHiddenRootDirent(uint32_t uid, uint64_t ino, std::string_view n
 bool BuildFilteredDirentPayload(const char* data, size_t size, uint32_t uid, uint64_t ino,
                                 std::vector<char>* out, size_t* removedCount,
                                 bool requireParentMatch = true);
-bool BuildFilteredDirentPayloadForParentPath(const char* data, size_t size, uint32_t uid,
-                                             std::string_view parentPath, std::vector<char>* out,
-                                             size_t* removedCount);
+bool BuildFilteredDirentPayloadForParentPath(
+    const char* data, size_t size, uint32_t uid, std::string_view parentPath,
+    std::vector<char>* out, size_t* removedCount,
+    std::vector<FilteredDirentMatch>* removedEntries = nullptr);
 bool BuildFilteredDirentplusPayload(const char* data, size_t size, uint32_t uid, uint64_t ino,
                                     std::vector<char>* out, size_t* removedCount,
                                     bool requireParentMatch = true);
-bool BuildFilteredDirentplusPayloadForParentPath(const char* data, size_t size, uint32_t uid,
-                                                 std::string_view parentPath,
-                                                 std::vector<char>* out, size_t* removedCount);
+bool BuildFilteredDirentplusPayloadForParentPath(
+    const char* data, size_t size, uint32_t uid, std::string_view parentPath,
+    std::vector<char>* out, size_t* removedCount,
+    std::vector<FilteredDirentMatch>* removedEntries = nullptr);
 void NoteHiddenSubtreePathForCache(std::string_view path);
 void RememberRecentHiddenParentPath(uint32_t uid, std::string_view path);
-std::optional<std::string> LookupRecentHiddenParentPath(uint32_t uid);
+std::optional<std::string> LookupRecentHiddenParentPath(uint32_t uid,
+                                                        uint32_t* matchedHiddenUid = nullptr);
 void ClearRecentHiddenParentPath(uint32_t uid);
 DirectoryEntries FilterHiddenDirectoryEntries(uint32_t uid, std::string_view parentPath,
                                               DirectoryEntries entries);

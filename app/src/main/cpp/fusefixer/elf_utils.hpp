@@ -37,11 +37,84 @@ inline constexpr std::string_view kIsBpfBackingPathSymbols[] = {
     "_ZL19is_bpf_backing_pathRKNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEE",
 };
 
+inline constexpr std::string_view kShouldNotCacheSymbols[] = {
+    "_ZN13mediaprovider4fuse4fuse14ShouldNotCacheERKNSt6__ndk112basic_stringIcNS3_11char_"
+    "traitsIcEENS3_9allocatorIcEEEE",
+    "_ZN13mediaprovider4fuse4fuse14ShouldNotCacheERKNSt6__ndk112basic_stringIcNS2_11char_"
+    "traitsIcEENS2_9allocatorIcEEEE",
+    "_ZN13mediaprovider4fuse4fuse14ShouldNotCacheERKNSt3__112basic_stringIcNS2_11char_"
+    "traitsIcEENS2_9allocatorIcEEEE",
+    "ShouldNotCache",
+};
+
 inline constexpr std::string_view kStrcasecmpSymbol = "strcasecmp";
 
 inline constexpr std::string_view kEqualsIgnoreCaseSymbols[] = {
     "_ZN7android4base16EqualsIgnoreCaseENSt6__ndk117basic_string_viewIcNS1_11char_traitsIcEEEES5_",
     "_ZN7android4base16EqualsIgnoreCaseENSt3__117basic_string_viewIcNS1_11char_traitsIcEEEES5_",
+};
+
+inline constexpr std::string_view kDoReaddirCommonSymbols[] = {
+    "do_readdir_common",
+};
+
+inline constexpr std::string_view kGetDirectoryEntriesSymbols[] = {
+    "_ZN13mediaprovider4fuse20MediaProviderWrapper19GetDirectoryEntriesEjRKNSt6__ndk112basic_"
+    "stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEEP3DIR",
+};
+
+inline constexpr std::string_view kAddDirectoryEntriesFromLowerFsSymbols[] = {
+    "_ZN13mediaprovider4fuse30addDirectoryEntriesFromLowerFsEP3DIRPFbRK6direntEPNSt6__"
+    "ndk16vectorINS8_10shared_ptrINS0_14DirectoryEntryEEENS8_9allocatorISC_EEEE",
+};
+
+inline constexpr std::string_view kPfLookupSymbols[] = {
+    "_ZN13mediaprovider4fuseL9pf_lookupEP8fuse_reqmPKc",
+};
+
+inline constexpr std::string_view kPfLookupPostfilterSymbols[] = {
+    "_ZN13mediaprovider4fuseL20pf_lookup_postfilterEP8fuse_reqmjPKcP14fuse_entry_outP18fuse_"
+    "entry_bpf_out",
+};
+
+inline constexpr std::string_view kPfGetattrSymbols[] = {
+    "_ZN13mediaprovider4fuseL10pf_getattrEP8fuse_reqmP14fuse_file_info",
+};
+
+inline constexpr std::string_view kPfMkdirSymbols[] = {
+    "_ZN13mediaprovider4fuseL8pf_mkdirEP8fuse_reqmPKcj",
+};
+
+inline constexpr std::string_view kPfMknodSymbols[] = {
+    "_ZN13mediaprovider4fuseL8pf_mknodEP8fuse_reqmPKcjm",
+};
+
+inline constexpr std::string_view kPfUnlinkSymbols[] = {
+    "_ZN13mediaprovider4fuseL9pf_unlinkEP8fuse_reqmPKc",
+};
+
+inline constexpr std::string_view kPfRmdirSymbols[] = {
+    "_ZN13mediaprovider4fuseL8pf_rmdirEP8fuse_reqmPKc",
+};
+
+inline constexpr std::string_view kPfRenameSymbols[] = {
+    "_ZN13mediaprovider4fuseL9pf_renameEP8fuse_reqmPKcmS4_j",
+};
+
+inline constexpr std::string_view kPfCreateSymbols[] = {
+    "_ZN13mediaprovider4fuseL9pf_createEP8fuse_reqmPKcjP14fuse_file_info",
+};
+
+inline constexpr std::string_view kPfReaddirSymbols[] = {
+    "_ZN13mediaprovider4fuseL10pf_readdirEP8fuse_reqmmP14fuse_file_info",
+};
+
+inline constexpr std::string_view kPfReaddirPostfilterSymbols[] = {
+    "_ZN13mediaprovider4fuseL21pf_readdir_postfilterEP8fuse_reqmjPKcPKvP14fuse_file_info",
+};
+
+inline constexpr std::string_view kPfReaddirplusSymbols[] = {
+    "_ZN13mediaprovider4fuseL14pf_readdirplusEP8fuse_reqmmP14fuse_file_info",
 };
 
 #if defined(__LP64__)
@@ -168,6 +241,12 @@ struct RuntimeDynamicInfo {
 #endif
 };
 
+struct SymbolMatch {
+    uintptr_t value = 0;
+    size_t size = 0;
+    std::string name;
+};
+
 inline uintptr_t RuntimePtr(uintptr_t base, uintptr_t value) {
     if (value == 0)
         return 0;
@@ -190,6 +269,8 @@ std::optional<std::pair<const std::byte*, size_t>> FindNamedSectionData(const Ma
 const char* XzRetName(enum xz_ret ret);
 std::optional<MappedFile> DecompressGnuDebugdata(const std::byte* compressed, size_t size);
 std::optional<uintptr_t> FindSymbolOffset(const MappedFile& file, std::string_view symbolName);
+std::optional<SymbolMatch> FindLargestSymbolContaining(const MappedFile& file,
+                                                       std::string_view needle);
 std::optional<size_t> VirtualAddressToFileOffset(const MappedFile& file, uintptr_t address);
 std::optional<DynamicInfo> ParseDynamicInfo(const MappedFile& file);
 std::optional<RuntimeDynamicInfo> ParseRuntimeDynamicInfo(const ModuleInfo& module);

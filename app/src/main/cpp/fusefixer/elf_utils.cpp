@@ -395,6 +395,96 @@ std::optional<uintptr_t> FindSymbolOffset(const MappedFile& file, std::string_vi
     return FindSymbolOffsetImpl(file, symbolName, 0);
 }
 
+void CollectSymbolsContainingImpl(const MappedFile& file, std::string_view needle, int depth,
+                                  std::vector<SymbolMatch>* matches) {
+    const auto* header = reinterpret_cast<const ElfHeader*>(file.bytes());
+    if (header == nullptr || std::memcmp(header->e_ident, ELFMAG, SELFMAG) != 0 ||
+        header->e_shoff == 0 || header->e_shnum == 0 || header->e_shentsize != sizeof(ElfSection)) {
+        return;
+    }
+
+    const auto* sections = reinterpret_cast<const ElfSection*>(file.bytes() + header->e_shoff);
+    for (uint16_t sectionIndex = 0; sectionIndex < header->e_shnum; ++sectionIndex) {
+        const auto& section = sections[sectionIndex];
+        if (section.sh_type != SHT_SYMTAB && section.sh_type != SHT_DYNSYM) {
+            continue;
+        }
+        if (section.sh_link >= header->e_shnum || section.sh_entsize != sizeof(ElfSymbol) ||
+            section.sh_size == 0) {
+            continue;
+        }
+        const auto& strtab = sections[section.sh_link];
+        if (strtab.sh_offset + strtab.sh_size > file.size ||
+            section.sh_offset + section.sh_size > file.size) {
+            continue;
+        }
+        const char* strings = reinterpret_cast<const char*>(file.bytes() + strtab.sh_offset);
+        const auto* symbols = reinterpret_cast<const ElfSymbol*>(file.bytes() + section.sh_offset);
+        const size_t symbolCount = section.sh_size / sizeof(ElfSymbol);
+        for (size_t symbolIndex = 0; symbolIndex < symbolCount; ++symbolIndex) {
+            const auto& symbol = symbols[symbolIndex];
+            if (symbol.st_name == 0 || symbol.st_value == 0) {
+                continue;
+            }
+            const char* currentName = strings + symbol.st_name;
+            if (currentName == nullptr) {
+                continue;
+            }
+            const std::string_view currentNameView(currentName);
+            if (currentNameView.find(needle) == std::string_view::npos) {
+                continue;
+            }
+            const bool duplicate =
+                std::any_of(matches->begin(), matches->end(), [&](const SymbolMatch& existing) {
+                    return existing.value == symbol.st_value && existing.size == symbol.st_size &&
+                           existing.name == currentNameView;
+                });
+            if (!duplicate) {
+                matches->push_back(SymbolMatch{static_cast<uintptr_t>(symbol.st_value),
+                                               static_cast<size_t>(symbol.st_size),
+                                               std::string(currentNameView)});
+            }
+        }
+    }
+
+    if (depth >= 2) {
+        return;
+    }
+
+    auto debugdata = FindNamedSectionData(file, ".gnu_debugdata");
+    if (!debugdata.has_value()) {
+        return;
+    }
+
+    auto decompressed = DecompressGnuDebugdata(debugdata->first, debugdata->second);
+    if (!decompressed.has_value()) {
+        return;
+    }
+
+    CollectSymbolsContainingImpl(*decompressed, needle, depth + 1, matches);
+}
+
+std::optional<SymbolMatch> FindLargestSymbolContaining(const MappedFile& file,
+                                                       std::string_view needle) {
+    std::vector<SymbolMatch> matches;
+    CollectSymbolsContainingImpl(file, needle, 0, &matches);
+    if (matches.empty()) {
+        return std::nullopt;
+    }
+    const auto best = std::max_element(matches.begin(), matches.end(),
+                                       [](const SymbolMatch& lhs, const SymbolMatch& rhs) {
+                                           if (lhs.size != rhs.size) {
+                                               return lhs.size < rhs.size;
+                                           }
+                                           return lhs.value > rhs.value;
+                                       });
+    __android_log_print(4, kLogTag,
+                        "resolved by contains needle=%s candidates=%zu picked=%s value=%p size=%zu",
+                        std::string(needle).c_str(), matches.size(), best->name.c_str(),
+                        reinterpret_cast<void*>(best->value), best->size);
+    return *best;
+}
+
 std::optional<size_t> VirtualAddressToFileOffset(const MappedFile& file, uintptr_t address) {
     const auto* header = reinterpret_cast<const ElfHeader*>(file.bytes());
     const auto* programHeaders =

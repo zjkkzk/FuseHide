@@ -79,6 +79,37 @@ bool IsFirstComponentOfHiddenRelativePath(std::string_view name) {
     return false;
 }
 
+void InvalidateFilteredParentChildren(std::string_view parentPath,
+                                      const std::vector<FilteredDirentMatch>& removedEntries) {
+    if (parentPath.empty() || removedEntries.empty()) {
+        return;
+    }
+    const auto parentIno = LookupTrackedInodeForPath(parentPath);
+    if (!parentIno.has_value()) {
+        DebugLogPrint(4,
+                      "skip filtered child invalidation parent=%s names=%zu reason=no_parent_ino",
+                      DebugPreview(parentPath).c_str(), removedEntries.size());
+        return;
+    }
+    for (const auto& entry : removedEntries) {
+        RuntimeState::ScheduleSpecificEntryInvalidation(*parentIno, entry.name);
+        if (entry.ino != 0) {
+            const std::string childPath =
+                HiddenPathPolicy::JoinPathComponent(parentPath, entry.name);
+            RememberTrackedPathForInode(entry.ino, childPath);
+            if (TrackHiddenSubtreeInode(entry.ino)) {
+                DebugLogPrint(4, "track filtered child inode parent=%s child=%s ino=%s",
+                              DebugPreview(parentPath).c_str(), DebugPreview(entry.name).c_str(),
+                              InodePath(entry.ino).c_str());
+            }
+            RuntimeState::ScheduleHiddenInodeInvalidation(entry.ino);
+        }
+    }
+    DebugLogPrint(4, "invalidate filtered children parent=%s ino=%s names=%zu",
+                  DebugPreview(parentPath).c_str(), InodePath(*parentIno).c_str(),
+                  removedEntries.size());
+}
+
 }  // namespace
 
 // pf_lookup is the earliest reliable place to learn the real root parent inode on this device.
@@ -544,10 +575,12 @@ extern "C" int WrappedReplyEntry(fuse_req_t req, const struct fuse_entry_param* 
         if (gTrackHiddenSubtreeLookup) {
             if (const auto parentPath = LookupTrackedPathForInode(gCurrentLookupParentInode);
                 parentPath.has_value()) {
+                RememberTrackedPathForInode(gCurrentLookupParentInode, *parentPath);
                 RememberRecentHiddenParentPath(RuntimeState::ReqUid(req), *parentPath);
                 DebugLogPrint(4, "refresh recent hidden parent from hidden lookup uid=%u path=%s",
                               static_cast<unsigned>(RuntimeState::ReqUid(req)),
                               DebugPreview(*parentPath).c_str());
+                RuntimeState::ScheduleHiddenInodeInvalidation(gCurrentLookupParentInode);
             }
         }
         if (auto ret = ReplyErrorBridge::Reply(req, ENOENT, "fuse_reply_entry"); ret.has_value()) {
@@ -569,6 +602,8 @@ extern "C" int WrappedReplyEntry(fuse_req_t req, const struct fuse_entry_param* 
     }
     fuse_entry_param patchedEntry = {};
     const struct fuse_entry_param* replyEntry = e;
+    bool forceUncachedReplyEntry = gTrackRootHiddenLookup || gTrackHiddenSubtreeLookup;
+    bool exactHiddenTargetReplyEntry = false;
     if (e != nullptr && (gTrackRootHiddenLookup || gTrackHiddenSubtreeLookup)) {
         patchedEntry = *e;
         patchedEntry.entry_timeout = 0.0;
@@ -605,17 +640,38 @@ extern "C" int WrappedReplyEntry(fuse_req_t req, const struct fuse_entry_param* 
         }
         if (childPath.has_value()) {
             RememberTrackedPathForInode(e->ino, *childPath);
-            if (HiddenPathPolicy::IsAnyHiddenSubtreePath(*childPath)) {
+            const bool hiddenSubtreePath = HiddenPathPolicy::IsAnyHiddenSubtreePath(*childPath);
+            exactHiddenTargetReplyEntry = HiddenPathPolicy::IsExactHiddenTargetPath(*childPath);
+            if (hiddenSubtreePath) {
                 TrackHiddenSubtreeInode(e->ino);
+                forceUncachedReplyEntry = true;
             }
-            if (HiddenPathPolicy::IsTestHiddenUid(RuntimeState::ReqUid(req)) &&
-                IsParentOfExactHiddenTargetPath(*childPath)) {
+            if (exactHiddenTargetReplyEntry) {
+                forceUncachedReplyEntry = true;
+                RuntimeState::ScheduleSpecificEntryInvalidation(gCurrentLookupParentInode,
+                                                                gCurrentLookupName);
+                RuntimeState::ScheduleHiddenInodeInvalidation(e->ino);
+                DebugLogPrint(4, "force uncached exact hidden target uid=%u path=%s ino=%s",
+                              static_cast<unsigned>(RuntimeState::ReqUid(req)),
+                              DebugPreview(*childPath).c_str(), InodePath(e->ino).c_str());
+            }
+            if (IsParentOfExactHiddenTargetPath(*childPath)) {
                 RememberRecentHiddenParentPath(RuntimeState::ReqUid(req), *childPath);
                 DebugLogPrint(4, "remember recent hidden parent uid=%u path=%s",
                               static_cast<unsigned>(RuntimeState::ReqUid(req)),
                               DebugPreview(*childPath).c_str());
             }
         }
+    }
+    if (e != nullptr && forceUncachedReplyEntry && replyEntry == e) {
+        patchedEntry = *e;
+        patchedEntry.entry_timeout = 0.0;
+        patchedEntry.attr_timeout = 0.0;
+        replyEntry = &patchedEntry;
+        DebugLogPrint(4, "disable entry cache req=%lu ino=%s root=%d child=%d exact=%d",
+                      req ? (unsigned long)req->unique : 0UL, InodePath(e->ino).c_str(),
+                      gTrackRootHiddenLookup ? 1 : 0, gTrackHiddenSubtreeLookup ? 1 : 0,
+                      exactHiddenTargetReplyEntry ? 1 : 0);
     }
     int ret = fn ? fn(req, replyEntry) : -1;
     DebugLogPrint(3,
@@ -656,6 +712,7 @@ extern "C" int WrappedReplyBuf(fuse_req_t req, const char* buf, size_t size) {
     size_t replySize = size;
     std::vector<char> filteredStorage;
     size_t removedCount = 0;
+    std::vector<FilteredDirentMatch> removedEntries;
     PendingReaddirContext pendingContext{};
     bool hasPendingContext = false;
     if (req != nullptr) {
@@ -667,7 +724,7 @@ extern "C" int WrappedReplyBuf(fuse_req_t req, const char* buf, size_t size) {
         }
     }
     const uint32_t reqUid = RuntimeState::ReqUid(req);
-    const uint32_t filterUid =
+    const uint32_t requestFilterUid =
         gPfReaddirUid != 0
             ? gPfReaddirUid
             : (hasPendingContext && pendingContext.uid != 0 ? pendingContext.uid : reqUid);
@@ -678,8 +735,18 @@ extern "C" int WrappedReplyBuf(fuse_req_t req, const char* buf, size_t size) {
     const bool filterReaddirplus = gInPfReaddirplus;
     const bool requireParentMatch = filterIno != 0;
     const char* filterMode = nullptr;
+    uint32_t fallbackHiddenUid = 0;
     const std::optional<std::string> fallbackParentPath =
-        filterIno == 0 ? LookupRecentHiddenParentPath(filterUid) : std::nullopt;
+        filterIno == 0 ? LookupRecentHiddenParentPath(requestFilterUid, &fallbackHiddenUid)
+                       : std::nullopt;
+    // Some device reply_buf paths lose the caller uid entirely, but we must not reuse the last
+    // hidden uid for an explicit non-hidden app. Only borrow fallback uid when the request uid is
+    // absent (0); otherwise recent parent state would bleed into unrelated apps.
+    const bool canBorrowFallbackUid =
+        requestFilterUid == 0 && HiddenPathPolicy::IsTestHiddenUid(fallbackHiddenUid);
+    const uint32_t filterUid = HiddenPathPolicy::IsTestHiddenUid(requestFilterUid)
+                                   ? requestFilterUid
+                                   : (canBorrowFallbackUid ? fallbackHiddenUid : 0);
 
     if (filterIno != 0 && !pendingContext.path.empty()) {
         RememberTrackedPathForInode(filterIno, pendingContext.path);
@@ -688,13 +755,15 @@ extern "C" int WrappedReplyBuf(fuse_req_t req, const char* buf, size_t size) {
     if (HiddenPathPolicy::IsTestHiddenUid(filterUid)) {
         DebugLogPrint(
             4,
-            "reply_buf filter ctx req=%lu uid=%u ino=%s pending=%d pending_path=%s "
-            "fallback_parent=%s mode_flags=%d/%d/%d",
-            req ? (unsigned long)req->unique : 0UL, static_cast<unsigned>(filterUid),
-            InodePath(filterIno).c_str(), hasPendingContext ? 1 : 0,
+            "reply_buf filter ctx req=%lu req_uid=%u uid=%u ino=%s pending=%d pending_path=%s "
+            "fallback_parent=%s fallback_uid=%u mode_flags=%d/%d/%d",
+            req ? (unsigned long)req->unique : 0UL, static_cast<unsigned>(requestFilterUid),
+            static_cast<unsigned>(filterUid), InodePath(filterIno).c_str(),
+            hasPendingContext ? 1 : 0,
             pendingContext.path.empty() ? "" : DebugPreview(pendingContext.path).c_str(),
             fallbackParentPath.has_value() ? DebugPreview(*fallbackParentPath).c_str() : "",
-            filterPlainReaddir ? 1 : 0, filterReaddirplus ? 1 : 0, filterPostfilterReaddir ? 1 : 0);
+            static_cast<unsigned>(fallbackHiddenUid), filterPlainReaddir ? 1 : 0,
+            filterReaddirplus ? 1 : 0, filterPostfilterReaddir ? 1 : 0);
     }
 
     if (HiddenPathPolicy::IsTestHiddenUid(filterUid)) {
@@ -740,19 +809,22 @@ extern "C" int WrappedReplyBuf(fuse_req_t req, const char* buf, size_t size) {
         // filtered by exact path instead of by name alone.
         if (filterMode == nullptr) {
             if (fallbackParentPath.has_value() &&
-                BuildFilteredDirentplusPayloadForParentPath(
-                    buf, size, filterUid, *fallbackParentPath, &filteredStorage, &removedCount)) {
+                BuildFilteredDirentplusPayloadForParentPath(buf, size, filterUid,
+                                                            *fallbackParentPath, &filteredStorage,
+                                                            &removedCount, &removedEntries)) {
                 replyBuf = filteredStorage.data();
                 replySize = filteredStorage.size();
                 filterMode = "fallback_parent_direntplus";
+                InvalidateFilteredParentChildren(*fallbackParentPath, removedEntries);
                 ClearRecentHiddenParentPath(filterUid);
             } else if (fallbackParentPath.has_value() &&
-                       BuildFilteredDirentPayloadForParentPath(buf, size, filterUid,
-                                                               *fallbackParentPath,
-                                                               &filteredStorage, &removedCount)) {
+                       BuildFilteredDirentPayloadForParentPath(
+                           buf, size, filterUid, *fallbackParentPath, &filteredStorage,
+                           &removedCount, &removedEntries)) {
                 replyBuf = filteredStorage.data();
                 replySize = filteredStorage.size();
                 filterMode = "fallback_parent_dirent";
+                InvalidateFilteredParentChildren(*fallbackParentPath, removedEntries);
                 ClearRecentHiddenParentPath(filterUid);
             } else if (size >= sizeof(fuse_read_out) && fallbackParentPath.has_value()) {
                 const auto* readOut = reinterpret_cast<const fuse_read_out*>(buf);
@@ -761,7 +833,7 @@ extern "C" int WrappedReplyBuf(fuse_req_t req, const char* buf, size_t size) {
                 std::vector<char> filteredPayload;
                 if (BuildFilteredDirentPayloadForParentPath(
                         buf + sizeof(fuse_read_out), payloadSize, filterUid, *fallbackParentPath,
-                        &filteredPayload, &removedCount)) {
+                        &filteredPayload, &removedCount, &removedEntries)) {
                     fuse_read_out patched = *readOut;
                     patched.size = static_cast<uint32_t>(filteredPayload.size());
                     filteredStorage.resize(sizeof(patched) + filteredPayload.size());
@@ -771,6 +843,7 @@ extern "C" int WrappedReplyBuf(fuse_req_t req, const char* buf, size_t size) {
                     replyBuf = filteredStorage.data();
                     replySize = filteredStorage.size();
                     filterMode = "fallback_parent_read_out_dirent";
+                    InvalidateFilteredParentChildren(*fallbackParentPath, removedEntries);
                     ClearRecentHiddenParentPath(filterUid);
                 }
             }
@@ -904,6 +977,15 @@ extern "C" int WrappedLstat(const char* path, struct stat* st) {
         const int ret = fn(path, st);
         if (ret == 0 && gInPfGetattr && gPfGetattrIno != 0) {
             RememberTrackedPathForInode(gPfGetattrIno, pathView);
+            if (HiddenPathPolicy::IsTestHiddenUid(gPfGetattrUid) &&
+                IsParentOfExactHiddenTargetPath(pathView)) {
+                // Some device builds enumerate the parent directory after only touching it through
+                // pf_getattr/lstat, without a visible parent lookup that would reach reply_entry.
+                // Seed the fallback parent path here so reply_buf can still filter nested children.
+                RememberRecentHiddenParentPath(gPfGetattrUid, pathView);
+                DebugLogPrint(4, "remember recent hidden parent from getattr uid=%u path=%s",
+                              static_cast<unsigned>(gPfGetattrUid), DebugPreview(pathView).c_str());
+            }
             if (HiddenPathPolicy::IsAnyHiddenSubtreePath(pathView)) {
                 TrackHiddenSubtreeInode(gPfGetattrIno);
             }

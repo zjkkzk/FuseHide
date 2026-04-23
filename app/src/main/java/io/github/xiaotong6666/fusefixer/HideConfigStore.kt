@@ -1,9 +1,19 @@
 package io.github.xiaotong6666.fusefixer
 
+import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import androidx.core.content.ContextCompat
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 object HideConfigStore {
     const val APP_PACKAGE: String = "io.github.xiaotong6666.fusefixer"
@@ -13,10 +23,14 @@ object HideConfigStore {
     const val ACTION_SET_CONFIG_STATUS: String = "io.github.xiaotong6666.fusefixer.SET_CONFIG_STATUS"
     const val ACTION_GET_APPLIED_HIDE_CONFIG: String = "io.github.xiaotong6666.fusefixer.GET_APPLIED_HIDE_CONFIG"
     const val ACTION_SET_APPLIED_HIDE_CONFIG: String = "io.github.xiaotong6666.fusefixer.SET_APPLIED_HIDE_CONFIG"
+    const val ACTION_REQUEST_HIDE_CONFIG: String = "io.github.xiaotong6666.fusefixer.REQUEST_HIDE_CONFIG"
+    const val ACTION_SET_HIDE_CONFIG: String = "io.github.xiaotong6666.fusefixer.SET_HIDE_CONFIG"
     const val EXTRA_RELOAD_TOKEN: String = "reload_token"
     const val EXTRA_RELOAD_APPLIED: String = "reload_applied"
     const val EXTRA_RELOAD_MESSAGE: String = "reload_message"
     const val EXTRA_QUERY_TOKEN: String = "query_token"
+    const val EXTRA_REPLY_PACKAGE: String = "reply_package"
+    const val EXTRA_REPLY_ACTION: String = "reply_action"
     private const val PREFS_NAME = "hide_config"
     private const val METHOD_GET_HIDE_CONFIG = "get_hide_config"
     private const val AUTHORITY = "io.github.xiaotong6666.fusefixer.hideconfig"
@@ -26,8 +40,13 @@ object HideConfigStore {
     private const val KEY_HIDDEN_RELATIVE_PATHS = "hidden_relative_paths"
     private const val KEY_HIDDEN_PACKAGES = "hidden_packages"
     private const val KEY_RELOAD_TOKEN = "reload_token"
+    private const val REQUEST_TIMEOUT_MS = 3000L
 
     private val providerUri: Uri = Uri.parse("content://$AUTHORITY")
+
+    fun interface ConfigBundleCallback {
+        fun onBundle(bundle: Bundle?)
+    }
 
     fun load(context: Context): HideConfig {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -123,8 +142,8 @@ object HideConfigStore {
     fun reloadTokenFromBundle(bundle: Bundle?): String? = bundle?.getString(KEY_RELOAD_TOKEN)
 
     @JvmStatic
-    fun reloadInjectedProcessConfig(context: Context): Boolean {
-        val config = loadViaProvider(context) ?: return false
+    fun applyBundleToNative(bundle: Bundle?): Boolean {
+        val config = fromBundle(bundle) ?: return false
         return try {
             HideConfigNativeBridge.applyHideConfig(
                 config.enableHideAllRootEntries,
@@ -135,9 +154,74 @@ object HideConfigStore {
             )
             true
         } catch (t: Throwable) {
-            Log.e("FuseFixer", "reloadInjectedProcessConfig", t)
+            Log.e("FuseFixer", "applyBundleToNative", t)
             false
         }
+    }
+
+    @JvmStatic
+    fun requestInjectedProcessConfigBundle(context: Context, callback: ConfigBundleCallback) {
+        val appContext = context.applicationContext ?: context
+        val requestToken = UUID.randomUUID().toString()
+        val finished = AtomicBoolean(false)
+        val mainHandler = Handler(Looper.getMainLooper())
+        lateinit var receiver: BroadcastReceiver
+
+        fun finish(bundle: Bundle?) {
+            if (!finished.compareAndSet(false, true)) {
+                return
+            }
+            try {
+                appContext.unregisterReceiver(receiver)
+            } catch (_: Throwable) {
+            }
+            callback.onBundle(bundle)
+        }
+
+        receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != ACTION_SET_HIDE_CONFIG) {
+                    return
+                }
+                val responseToken = intent.getStringExtra(EXTRA_QUERY_TOKEN)
+                if (responseToken != requestToken) {
+                    return
+                }
+                finish(intent.extras?.let { Bundle(it) })
+            }
+        }
+
+        val filter = IntentFilter(ACTION_SET_HIDE_CONFIG)
+        if (Build.VERSION.SDK_INT >= 33) {
+            appContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            ContextCompat.registerReceiver(appContext, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        }
+
+        mainHandler.postDelayed({ finish(null) }, REQUEST_TIMEOUT_MS)
+
+        appContext.sendBroadcast(
+            Intent(ACTION_REQUEST_HIDE_CONFIG)
+                .setComponent(ComponentName(APP_PACKAGE, "$APP_PACKAGE.HideConfigRequestReceiver"))
+                .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+                .putExtra(EXTRA_QUERY_TOKEN, requestToken)
+                .putExtra(EXTRA_REPLY_PACKAGE, appContext.packageName)
+                .putExtra(EXTRA_REPLY_ACTION, ACTION_SET_HIDE_CONFIG),
+        )
+        Log.d("FuseFixer", "requested hide config replyPackage=${appContext.packageName} queryToken=$requestToken")
+    }
+
+    @JvmStatic
+    fun reloadInjectedProcessConfig(context: Context): Boolean {
+        val providerBundle = loadViaProviderBundle(context)
+        if (applyBundleToNative(providerBundle)) {
+            return true
+        }
+        requestInjectedProcessConfigBundle(context) { bundle ->
+            val applied = applyBundleToNative(bundle)
+            Log.d("FuseFixer", "initial config fallback applied=$applied")
+        }
+        return false
     }
 
     fun sendReloadBroadcast(context: Context, reloadToken: String) {

@@ -44,6 +44,14 @@
             android:name="io.github.xiaotong6666.fusefixer.HideConfigProvider"
             android:authorities="io.github.xiaotong6666.fusefixer.hideconfig"
             android:exported="true" />
+
+        <receiver
+            android:name="io.github.xiaotong6666.fusefixer.HideConfigRequestReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.github.xiaotong6666.fusefixer.REQUEST_HIDE_CONFIG" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>
