@@ -48,6 +48,10 @@ object HideConfigStore {
         fun onBundle(bundle: Bundle?)
     }
 
+    fun interface ReloadConfigCallback {
+        fun onResult(applied: Boolean)
+    }
+
     fun load(context: Context): HideConfig {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val defaults = HideConfigDefaults.value
@@ -212,14 +216,19 @@ object HideConfigStore {
     }
 
     @JvmStatic
-    fun reloadInjectedProcessConfig(context: Context): Boolean {
+    fun reloadInjectedProcessConfig(context: Context): Boolean = reloadInjectedProcessConfig(context, null)
+
+    @JvmStatic
+    fun reloadInjectedProcessConfig(context: Context, callback: ReloadConfigCallback?): Boolean {
         val providerBundle = loadViaProviderBundle(context)
         if (applyBundleToNative(providerBundle)) {
+            callback?.onResult(true)
             return true
         }
         requestInjectedProcessConfigBundle(context) { bundle ->
             val applied = applyBundleToNative(bundle)
             Log.d("FuseFixer", "initial config fallback applied=$applied")
+            callback?.onResult(applied)
         }
         return false
     }
