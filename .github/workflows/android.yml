@@ -24,147 +24,54 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build APKs
+    uses: ./.github/workflows/build.yml
+    with:
+      java_version: '21'
+    secrets: inherit
 
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+  release:
+    name: Publish GitHub release
+    needs: build
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      release_tag: v${{ needs.build.outputs.version_code }}
+      release_title: FuseHide ${{ needs.build.outputs.version_name }}
+      delete_existing_assets: true
+      version_name: ${{ needs.build.outputs.version_name }}
+      version_code: ${{ needs.build.outputs.version_code }}
+      commit_sha: ${{ needs.build.outputs.commit_sha }}
+      commit_url: ${{ needs.build.outputs.commit_url }}
+      build_duration: ${{ needs.build.outputs.build_duration }}
+      release_apk_name: ${{ needs.build.outputs.release_apk_name }}
+      debug_apk_name: ${{ needs.build.outputs.debug_apk_name }}
+      release_sha256: ${{ needs.build.outputs.release_sha256 }}
+      debug_sha256: ${{ needs.build.outputs.debug_sha256 }}
+    secrets: inherit
 
-    - name: Set up JDK 21
-      uses: actions/setup-java@v4
-      with:
-        java-version: '21'
-        distribution: 'temurin'
-
-    - name: Cache Gradle
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.gradle/caches
-          ~/.gradle/wrapper/
-        key: gradle-${{ hashFiles('**/gradle-wrapper.properties') }}-${{ hashFiles('**/*.gradle*', '**/build.gradle*') }}
-        restore-keys: |
-          gradle-
-
-    - name: Restore debug keystore
-      env:
-        ANDROID_DEBUG_KEYSTORE: ${{ secrets.ANDROID_DEBUG_KEYSTORE }}
-      run: |
-        if [ -n "$ANDROID_DEBUG_KEYSTORE" ]; then
-          mkdir -p ~/.android
-          echo "$ANDROID_DEBUG_KEYSTORE" | base64 --decode > ~/.android/debug.keystore
-          echo "Debug keystore restored."
-        else
-          echo "No secret found. Gradle will generate a temporary debug keystore."
-        fi
-
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-
-    - name: Build APKs
-      run: ./gradlew assembleDebug assembleRelease
-
-    - name: Get commit count
-      id: commit_count
-      run: |
-        COUNT=$(git rev-list --count HEAD)
-        echo "COUNT=$COUNT" >> $GITHUB_ENV
-        echo "count=$COUNT" >> $GITHUB_OUTPUT
-        echo "Version: v$COUNT"
-
-    - name: Compute version info
-      id: version_info
-      run: |
-        VERSION_CODE=$(git rev-list --count HEAD)
-        VERSION_NAME="1.${VERSION_CODE}"
-        COMMUNITY_TAG="${VERSION_CODE}-${VERSION_NAME}"
-        echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
-        echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
-        echo "COMMUNITY_TAG=$COMMUNITY_TAG" >> $GITHUB_ENV
-        echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
-        echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
-        echo "community_tag=$COMMUNITY_TAG" >> $GITHUB_OUTPUT
-
-    - name: Rename APKs
-      run: |
-        find app/build/outputs/apk -type f -name "*.apk" | while read file; do
-          dir=$(dirname "$file")
-          filename=$(basename "$file")
-
-          if [[ "$filename" == *"debug"* ]]; then
-            new_name="FuseHide_Debug_v${COUNT}.apk"
-          else
-            new_name="FuseHide_v${COUNT}.apk"
-          fi
-
-          mv "$file" "$dir/$new_name"
-          echo "$filename -> $new_name"
-        done
-
-    - name: Upload debug APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: app-debug
-        path: app/build/outputs/apk/debug/FuseHide_Debug_v*.apk
-
-    - name: Upload release APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: app-release
-        path: app/build/outputs/apk/release/FuseHide_v*.apk
-
-    - name: Create GitHub Release
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: v${{ steps.commit_count.outputs.count }}
-        overwrite: true
-        files: |
-          app/build/outputs/apk/debug/FuseHide_Debug_v*.apk
-          app/build/outputs/apk/release/FuseHide_v*.apk
-
-    - name: Sync community release
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      env:
-        GH_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
-      run: |
-        set -e
-        test -n "$GH_TOKEN"
-        
-        TARGET_REPO="Xposed-Modules-Repo/io.github.xiaotong6666.fusehide"
-        MAIN_REPO="XiaoTong6666/FuseHide"
-        
-        RELEASE_APK=$(ls app/build/outputs/apk/release/FuseHide_v*.apk | head -n1)
-        
-        COMMIT_SHA=$(git rev-parse --short HEAD)
-        COMMIT_FULL_SHA=$(git rev-parse HEAD)
-        COMMIT_URL="https://github.com/${MAIN_REPO}/commit/${COMMIT_FULL_SHA}"
-        COMMIT_MESSAGE=$(git log -1 --pretty=%B)
-        
-        cat > community-release-note.md <<EOF
-        同步自主仓库构建产物喵
-        
-        commit: [${COMMIT_SHA}](${COMMIT_URL})
-        
-        message:
-        ${COMMIT_MESSAGE}
-        EOF
-        
-        if gh release view "$COMMUNITY_TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
-          gh release edit "$COMMUNITY_TAG" \
-            --repo "$TARGET_REPO" \
-            --title "$VERSION_NAME" \
-            --notes-file community-release-note.md
-        else
-          gh release create "$COMMUNITY_TAG" \
-            --repo "$TARGET_REPO" \
-            --title "$VERSION_NAME" \
-            --notes-file community-release-note.md
-        fi
-        
-        gh release upload "$COMMUNITY_TAG" "$RELEASE_APK" \
-          --repo "$TARGET_REPO" \
-          --clobber
+  xposed-release:
+    name: Sync Xposed community release
+    needs:
+      - build
+      - release
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    uses: ./.github/workflows/xposed-release.yml
+    with:
+      main_repo: XiaoTong6666/FuseHide
+      target_repo: Xposed-Modules-Repo/io.github.xiaotong6666.fusehide
+      version_name: ${{ needs.build.outputs.version_name }}
+      version_code: ${{ needs.build.outputs.version_code }}
+      community_tag: ${{ needs.build.outputs.community_tag }}
+      commit_sha: ${{ needs.build.outputs.commit_sha }}
+      commit_full_sha: ${{ needs.build.outputs.commit_full_sha }}
+      build_duration: ${{ needs.build.outputs.build_duration }}
+      release_apk_name: ${{ needs.build.outputs.release_apk_name }}
+      release_sha256: ${{ needs.build.outputs.release_sha256 }}
+    secrets: inherit

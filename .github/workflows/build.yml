@@ -1,0 +1,215 @@
+name: Android Build
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        required: true
+        type: string
+
+    outputs:
+      release_apk_name:
+        value: ${{ jobs.build.outputs.release_apk_name }}
+      debug_apk_name:
+        value: ${{ jobs.build.outputs.debug_apk_name }}
+      release_artifact_name:
+        value: ${{ jobs.build.outputs.release_artifact_name }}
+      debug_artifact_name:
+        value: ${{ jobs.build.outputs.debug_artifact_name }}
+      version_name:
+        value: ${{ jobs.build.outputs.version_name }}
+      version_code:
+        value: ${{ jobs.build.outputs.version_code }}
+      community_tag:
+        value: ${{ jobs.build.outputs.community_tag }}
+      commit_sha:
+        value: ${{ jobs.build.outputs.commit_sha }}
+      commit_full_sha:
+        value: ${{ jobs.build.outputs.commit_full_sha }}
+      commit_url:
+        value: ${{ jobs.build.outputs.commit_url }}
+      build_duration:
+        value: ${{ jobs.build.outputs.build_duration }}
+      release_sha256:
+        value: ${{ jobs.build.outputs.release_sha256 }}
+      debug_sha256:
+        value: ${{ jobs.build.outputs.debug_sha256 }}
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build APKs
+    runs-on: ubuntu-latest
+
+    outputs:
+      release_apk_name: ${{ steps.meta.outputs.release_apk_name }}
+      debug_apk_name: ${{ steps.meta.outputs.debug_apk_name }}
+      release_artifact_name: ${{ steps.meta.outputs.release_artifact_name }}
+      debug_artifact_name: ${{ steps.meta.outputs.debug_artifact_name }}
+      version_name: ${{ steps.meta.outputs.version_name }}
+      version_code: ${{ steps.meta.outputs.version_code }}
+      community_tag: ${{ steps.meta.outputs.community_tag }}
+      commit_sha: ${{ steps.meta.outputs.commit_sha }}
+      commit_full_sha: ${{ steps.meta.outputs.commit_full_sha }}
+      commit_url: ${{ steps.meta.outputs.commit_url }}
+      build_duration: ${{ steps.build.outputs.duration_human }}
+      release_sha256: ${{ steps.meta.outputs.release_sha256 }}
+      debug_sha256: ${{ steps.meta.outputs.debug_sha256 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java_version }}
+          distribution: temurin
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper/
+          key: gradle-${{ hashFiles('**/gradle-wrapper.properties') }}-${{ hashFiles('**/*.gradle*', '**/build.gradle*') }}
+          restore-keys: |
+            gradle-
+
+      - name: Restore debug keystore
+        env:
+          ANDROID_DEBUG_KEYSTORE: ${{ secrets.ANDROID_DEBUG_KEYSTORE }}
+        run: |
+          set -euo pipefail
+          if [ -n "${ANDROID_DEBUG_KEYSTORE:-}" ]; then
+            mkdir -p ~/.android
+            echo "$ANDROID_DEBUG_KEYSTORE" | base64 --decode > ~/.android/debug.keystore
+            echo "Debug keystore restored."
+          else
+            echo "No secret found. Gradle will generate a temporary debug keystore."
+          fi
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build APKs
+        id: build
+        run: |
+          set -euo pipefail
+
+          start_time="$(date +%s)"
+          ./gradlew assembleDebug assembleRelease
+          end_time="$(date +%s)"
+
+          duration_seconds=$((end_time - start_time))
+          duration_minutes=$((duration_seconds / 60))
+          duration_remainder=$((duration_seconds % 60))
+          printf -v duration_human "%dm %02ds" "$duration_minutes" "$duration_remainder"
+
+          {
+            echo "duration_seconds=${duration_seconds}"
+            echo "duration_human=${duration_human}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Collect APK metadata
+        id: meta
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/apks/debug dist/apks/release dist/metadata
+
+          VERSION_CODE="$(git rev-list --count HEAD)"
+          VERSION_NAME="1.${VERSION_CODE}"
+          COMMUNITY_TAG="${VERSION_CODE}-${VERSION_NAME}"
+          DEBUG_APK_NAME="FuseHide_Debug_v${VERSION_CODE}.apk"
+          RELEASE_APK_NAME="FuseHide_v${VERSION_CODE}.apk"
+          DEBUG_ARTIFACT_NAME="app-debug"
+          RELEASE_ARTIFACT_NAME="app-release"
+
+          DEBUG_APK="$(find app/build/outputs/apk/debug -type f -name '*.apk' | sort | head -n1)"
+          RELEASE_APK="$(find app/build/outputs/apk/release -type f -name '*.apk' | sort | head -n1)"
+
+          test -f "$DEBUG_APK"
+          test -f "$RELEASE_APK"
+
+          cp "$DEBUG_APK" "dist/apks/debug/${DEBUG_APK_NAME}"
+          cp "$RELEASE_APK" "dist/apks/release/${RELEASE_APK_NAME}"
+
+          COMMIT_SHA="$(git rev-parse --short HEAD)"
+          COMMIT_FULL_SHA="$(git rev-parse HEAD)"
+          COMMIT_URL="https://github.com/${{ github.repository }}/commit/${COMMIT_FULL_SHA}"
+          RELEASE_SHA256="$(sha256sum "dist/apks/release/${RELEASE_APK_NAME}" | awk '{print $1}')"
+          DEBUG_SHA256="$(sha256sum "dist/apks/debug/${DEBUG_APK_NAME}" | awk '{print $1}')"
+
+          git log -1 --pretty=%B > dist/metadata/commit-message.txt
+
+          cat > dist/metadata/build-summary.md <<EOF
+          # Build Metadata
+
+          - Release APK: \`${RELEASE_APK_NAME}\`
+          - Debug APK: \`${DEBUG_APK_NAME}\`
+          - Version: \`${VERSION_NAME}\`
+          - VersionCode: \`${VERSION_CODE}\`
+          - Commit: [\`${COMMIT_SHA}\`](${COMMIT_URL})
+          - Build time: \`${{ steps.build.outputs.duration_human }}\`
+
+          ## SHA256
+
+          - Release: \`${RELEASE_SHA256}\`
+          - Debug: \`${DEBUG_SHA256}\`
+          EOF
+
+          cat dist/metadata/build-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "release_apk_name=${RELEASE_APK_NAME}"
+            echo "debug_apk_name=${DEBUG_APK_NAME}"
+            echo "release_artifact_name=${RELEASE_ARTIFACT_NAME}"
+            echo "debug_artifact_name=${DEBUG_ARTIFACT_NAME}"
+            echo "version_name=${VERSION_NAME}"
+            echo "version_code=${VERSION_CODE}"
+            echo "community_tag=${COMMUNITY_TAG}"
+            echo "commit_sha=${COMMIT_SHA}"
+            echo "commit_full_sha=${COMMIT_FULL_SHA}"
+            echo "commit_url=${COMMIT_URL}"
+            echo "release_sha256=${RELEASE_SHA256}"
+            echo "debug_sha256=${DEBUG_SHA256}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.debug_artifact_name }}
+          path: dist/apks/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.release_artifact_name }}
+          path: dist/apks/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload APK files
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-files
+          path: dist/apks/**/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-metadata
+          path: dist/metadata/*
+          if-no-files-found: error
+          retention-days: 7
