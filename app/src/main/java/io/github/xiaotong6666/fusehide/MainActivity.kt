@@ -37,18 +37,6 @@ import io.github.xiaotong6666.fusehide.ui.theme.fuseHideTheme
 import java.lang.ref.WeakReference
 import java.util.UUID
 
-data class HideConfigDiff(
-    val hasDifferences: Boolean,
-    val summary: String,
-    val details: String,
-
-)
-
-data class GridActionItem(
-    val label: String,
-    val action: () -> Unit,
-    val isError: Boolean = false,
-)
 class MainActivity : ComponentActivity() {
     companion object {
         private const val EXTRA_DEBUG_PATH = "debug_path"
@@ -103,9 +91,18 @@ class MainActivity : ComponentActivity() {
     private lateinit var appliedConfigReceiver: BroadcastReceiver
     private var pendingReloadToken: String? = null
     private var pendingQueryToken: String? = null
-    private val hookStatusProbe = HookStatusProbe(this) { binderReference, statusThread ->
-        statusBinderReference = binderReference
-        statusCheckThread = statusThread
+    private val hookStatusProbe by lazy {
+        HookStatusProbe(
+            context = this,
+            onTimeout = {
+                statusBinderReference = null
+                onHookCheckTimeout()
+            },
+            onStarted = { binderReference, statusThread ->
+                statusBinderReference = binderReference
+                statusCheckThread = statusThread
+            },
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -189,54 +186,11 @@ class MainActivity : ComponentActivity() {
                 FuseHideHomeScreen(
                     selectedTab = selectedTab,
                     onTabSelected = { selectedTab = it },
-                    infoText = infoText,
-                    statusText = statusText,
-                    isHooked = hookedPackage != null,
-                    hookedPackage = hookedPackage,
-                    hookedPid = hookedPid,
-                    hookCheckCompleted = hookCheckCompleted,
-                    configStatusText = configStatusText,
-                    lastAckTokenText = lastAckTokenText,
-                    lastAckResultText = lastAckResultText,
-                    lastApplyTimeText = lastApplyTimeText,
-                    draftVsAppliedDiff = buildDraftVsAppliedDiff(this@MainActivity, currentHideConfig(), appliedHideConfig),
-                    appliedConfigSnapshotText = appliedConfigSnapshotText,
-                    highlightConfigResults = highlightConfigResults,
-                    configResultsScrollToken = configResultsScrollToken,
-                    enableHideAllRootEntries = enableHideAllRootEntries,
-                    hideAllRootEntriesExemptionsText = hideAllRootEntriesExemptionsText,
-                    hiddenTargetsText = hiddenTargetsText,
-                    hiddenPackagesText = hiddenPackagesText,
-                    pathText = pathText,
-                    pathText2 = pathText2,
-                    outputText = outputText,
-                    onStatusClick = ::startStatusCheck,
-                    onEnableHideAllRootEntriesChanged = { enableHideAllRootEntries = it },
-                    onHideAllRootEntriesExemptionsChanged = { hideAllRootEntriesExemptionsText = it },
-                    onHiddenTargetsChanged = { hiddenTargetsText = it },
-                    onHiddenPackagesChanged = { hiddenPackagesText = it },
-                    onSaveConfigClick = ::saveHideConfig,
-                    onApplyConfigClick = ::applyHideConfig,
-                    onResetConfigClick = ::resetHideConfigToDefaults,
-                    onRefreshAppliedConfigClick = ::refreshAppliedConfig,
-                    onPathChanged = { pathText = it },
-                    onPath2Changed = { pathText2 = it },
-                    onStatClick = { runPathCheck(0) },
-                    onAccessClick = { runPathCheck(1) },
-                    onListClick = { runPathCheck(2) },
-                    onOpenClick = { runPathCheck(3) },
-                    onGetConClick = { runPathCheck(4) },
-                    onCreateClick = { runPathCheck(5) },
-                    onMkdirClick = { runPathCheck(6) },
-                    onMoveClick = { runPathCheck(7) },
-                    onRmdirClick = { runPathCheck(8) },
-                    onUnlinkClick = { runPathCheck(9) },
-                    onAllPkgClick = ::runAllPkgCheck,
-                    onInsertZwjClick = ::insertZwj,
-                    onClearClick = { outputText = "" },
-                    onResetClick = { pathText = PathDebugActions.defaultPath() },
-                    onCopyAllClick = ::copyAll,
-                    onSelfDataClick = { appendOutput("external files dir: ${getExternalFilesDir("")}\n") },
+                    hookStatus = hookStatusUiState(),
+                    configState = configUiState(),
+                    debugState = debugUiState(),
+                    configCallbacks = configCallbacks(),
+                    debugCallbacks = debugCallbacks(),
                 )
             }
         }
@@ -337,10 +291,6 @@ class MainActivity : ComponentActivity() {
         hookStatusProbe.start()
     }
 
-    fun clearStatusBinderReference() {
-        statusBinderReference = null
-    }
-
     fun updateStatusText() {
         statusCheckInFlight = false
         statusCheckThread = null
@@ -401,6 +351,70 @@ class MainActivity : ComponentActivity() {
             hiddenPackages = HideConfigDefaults.parseEditorText(hiddenPackagesText),
         )
     }
+
+    private fun hookStatusUiState(): HookStatusUiState = HookStatusUiState(
+        infoText = infoText,
+        statusText = statusText,
+        isHooked = hookedPackage != null,
+        hookedPackage = hookedPackage,
+        hookedPid = hookedPid,
+        hookCheckCompleted = hookCheckCompleted,
+    )
+
+    private fun configUiState(): ConfigUiState = ConfigUiState(
+        configStatusText = configStatusText,
+        lastAckTokenText = lastAckTokenText,
+        lastAckResultText = lastAckResultText,
+        lastApplyTimeText = lastApplyTimeText,
+        draftVsAppliedDiff = buildDraftVsAppliedDiff(this, currentHideConfig(), appliedHideConfig),
+        appliedConfigSnapshotText = appliedConfigSnapshotText,
+        highlightConfigResults = highlightConfigResults,
+        configResultsScrollToken = configResultsScrollToken,
+        enableHideAllRootEntries = enableHideAllRootEntries,
+        hideAllRootEntriesExemptionsText = hideAllRootEntriesExemptionsText,
+        hiddenTargetsText = hiddenTargetsText,
+        hiddenPackagesText = hiddenPackagesText,
+    )
+
+    private fun debugUiState(): DebugUiState = DebugUiState(
+        pathText = pathText,
+        pathText2 = pathText2,
+        outputText = outputText,
+    )
+
+    private fun configCallbacks(): ConfigCallbacks = ConfigCallbacks(
+        onStatusClick = ::startStatusCheck,
+        onEnableHideAllRootEntriesChanged = { enableHideAllRootEntries = it },
+        onHideAllRootEntriesExemptionsChanged = { hideAllRootEntriesExemptionsText = it },
+        onHiddenTargetsChanged = { hiddenTargetsText = it },
+        onHiddenPackagesChanged = { hiddenPackagesText = it },
+        onSaveConfigClick = ::saveHideConfig,
+        onApplyConfigClick = ::applyHideConfig,
+        onResetConfigClick = ::resetHideConfigToDefaults,
+        onRefreshAppliedConfigClick = ::refreshAppliedConfig,
+    )
+
+    private fun debugCallbacks(): DebugCallbacks = DebugCallbacks(
+        onStatusClick = ::startStatusCheck,
+        onPathChanged = { pathText = it },
+        onPath2Changed = { pathText2 = it },
+        onStatClick = { runPathCheck(0) },
+        onAccessClick = { runPathCheck(1) },
+        onListClick = { runPathCheck(2) },
+        onOpenClick = { runPathCheck(3) },
+        onGetConClick = { runPathCheck(4) },
+        onCreateClick = { runPathCheck(5) },
+        onMkdirClick = { runPathCheck(6) },
+        onMoveClick = { runPathCheck(7) },
+        onRmdirClick = { runPathCheck(8) },
+        onUnlinkClick = { runPathCheck(9) },
+        onAllPkgClick = ::runAllPkgCheck,
+        onInsertZwjClick = ::insertZwj,
+        onClearClick = { outputText = "" },
+        onResetClick = { pathText = PathDebugActions.defaultPath() },
+        onCopyAllClick = ::copyAll,
+        onSelfDataClick = { appendOutput("external files dir: ${getExternalFilesDir("")}\n") },
+    )
 
     private fun saveHideConfig() {
         HideConfigStore.save(this, currentHideConfig())

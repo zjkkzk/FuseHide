@@ -20,42 +20,46 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Binder
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import java.lang.ref.ReferenceQueue
 import java.lang.ref.WeakReference
 
 class HookStatusProbe(
-    private val activity: MainActivity,
+    private val context: Context,
+    private val onTimeout: () -> Unit,
     private val onStarted: (WeakReference<Binder>, Thread) -> Unit,
 ) {
+    private val appContext = context.applicationContext ?: context
+
     fun start() {
         val binder = Binder()
         val referenceQueue = ReferenceQueue<Binder>()
         val binderReference = WeakReference(binder, referenceQueue)
 
         val intent = Intent(ACTION_GET_STATUS).setPackage(APP_PACKAGE)
-        intent.putExtra("EXTRA_PENDING_INTENT", PendingIntent.getBroadcast(activity, 1, intent, 67108864))
+        intent.putExtra("EXTRA_PENDING_INTENT", PendingIntent.getBroadcast(context, 1, intent, 67108864))
         intent.extras?.putBinder("EXTRA_BINDER", binder)
 
         MEDIA_PROVIDER_PACKAGES.forEach { packageName ->
             intent.setPackage(packageName)
             Log.d("FuseHide", "send GET_STATUS to ${intent.`package`}")
-            activity.sendBroadcast(intent)
+            appContext.sendBroadcast(intent)
         }
 
-        val statusThread = Thread { waitForBinderRelease(activity, referenceQueue) }
+        val statusThread = Thread { waitForBinderRelease(referenceQueue) }
         statusThread.start()
         onStarted(binderReference, statusThread)
     }
 
-    private fun waitForBinderRelease(activity: MainActivity, referenceQueue: ReferenceQueue<Binder>) {
+    private fun waitForBinderRelease(referenceQueue: ReferenceQueue<Binder>) {
         try {
             Thread.sleep(2000L)
             Runtime.getRuntime().gc()
             Log.d("FuseHide", "polling ref ...")
             Log.d("FuseHide", "polled = ${referenceQueue.remove()}")
-            activity.clearStatusBinderReference()
-            activity.runOnUiThread(MainThreadTask(1, activity))
+            Handler(Looper.getMainLooper()).post(onTimeout)
         } catch (_: InterruptedException) {
             Log.d("FuseHide", "return")
         }
