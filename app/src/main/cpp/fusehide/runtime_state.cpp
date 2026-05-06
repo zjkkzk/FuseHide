@@ -832,11 +832,14 @@ bool HiddenPathPolicy::ShouldFilterHiddenRootDirent(uint32_t uid, uint64_t ino,
         }
     }
 
+    if (!requireParentMatch) {
+        // Without a trusted parent inode/path we cannot tell whether this dirent belongs to
+        // /storage/emulated/0 or to an exempt subtree such as /storage/emulated/0/Android.
+        // Keep the legacy exact-name fallback, but do not apply hide-all wildcard filtering here.
+        return IsConfiguredHiddenRootEntryName(name);
+    }
     if (!IsHiddenRootEntryName(name)) {
         return false;
-    }
-    if (!requireParentMatch) {
-        return true;
     }
     const uint64_t rootParent = gHiddenRootParentInode.load(std::memory_order_relaxed);
     return rootParent == 0 || ino == rootParent;
