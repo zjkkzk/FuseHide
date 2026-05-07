@@ -23,9 +23,13 @@ class HiddenPathPolicy final {
     static bool IsTestHiddenUid(uint32_t uid);
     static bool ShouldHideTestPath(uint32_t uid, std::string_view path);
     static bool IsConfiguredHiddenRootEntryName(std::string_view name);
+    static bool IsConfiguredHiddenRootEntryName(uint32_t uid, std::string_view name);
     static bool IsHiddenRootEntryName(std::string_view name);
+    static bool IsHiddenRootEntryName(uint32_t uid, std::string_view name);
     static bool IsAnyHiddenSubtreePath(std::string_view path);
+    static bool IsAnyHiddenSubtreePath(uint32_t uid, std::string_view path);
     static bool IsExactHiddenTargetPath(std::string_view path);
+    static bool IsExactHiddenTargetPath(uint32_t uid, std::string_view path);
     static bool IsHiddenRootDirectoryPath(std::string_view path);
     static std::string JoinPathComponent(std::string_view parent, std::string_view child);
     static bool ShouldFilterHiddenRootDirent(uint32_t uid, uint64_t ino, std::string_view name,
@@ -38,6 +42,7 @@ bool MatchesRelativeHiddenPathList(std::string_view relativePath, bool exactOnly
 bool IsWildcardRootEntryCandidate(std::string_view name);
 bool ShouldHideWildcardRootEntryByParent(uint64_t parent, uint64_t rootParent,
                                          std::string_view name);
+bool IsParentOfExactHiddenTargetPath(uint32_t uid, std::string_view path);
 bool IsParentOfExactHiddenTargetPath(std::string_view path);
 
 }  // namespace fusehide

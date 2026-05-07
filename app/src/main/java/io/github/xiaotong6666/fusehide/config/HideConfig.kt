@@ -16,12 +16,19 @@
 
 package io.github.xiaotong6666.fusehide.config
 
+data class PackageHideRule(
+    val packageName: String,
+    val hiddenRootEntryNames: List<String>,
+    val hiddenRelativePaths: List<String>,
+)
+
 data class HideConfig(
     val enableHideAllRootEntries: Boolean,
     val hideAllRootEntriesExemptions: List<String>,
     val hiddenRootEntryNames: List<String>,
     val hiddenRelativePaths: List<String>,
     val hiddenPackages: List<String>,
+    val packageRules: List<PackageHideRule> = emptyList(),
 )
 
 object HideConfigDefaults {
@@ -30,9 +37,21 @@ object HideConfigDefaults {
             enableHideAllRootEntries = HideConfigNativeBridge.getDefaultEnableHideAllRootEntries(),
             hideAllRootEntriesExemptions =
             HideConfigNativeBridge.getDefaultHideAllRootEntriesExemptions().toList(),
-            hiddenRootEntryNames = HideConfigNativeBridge.getDefaultHiddenRootEntryNames().toList(),
+            hiddenRootEntryNames = listOf("su", "daemonsu"),
             hiddenRelativePaths = HideConfigNativeBridge.getDefaultHiddenRelativePaths().toList(),
             hiddenPackages = HideConfigNativeBridge.getDefaultHiddenPackages().toList(),
+            packageRules = listOf(
+                PackageHideRule(
+                    packageName = "io.github.xiaotong6666.fusehide",
+                    hiddenRootEntryNames = listOf("xinhao"),
+                    hiddenRelativePaths = emptyList(),
+                ),
+                PackageHideRule(
+                    packageName = "com.eltavine.duckdetector",
+                    hiddenRootEntryNames = listOf("MT2", "xinhao"),
+                    hiddenRelativePaths = emptyList(),
+                ),
+            ),
         )
     }
 

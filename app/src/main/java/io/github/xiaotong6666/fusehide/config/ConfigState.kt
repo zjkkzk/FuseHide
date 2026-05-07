@@ -23,8 +23,15 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-fun parseHiddenTargetRules(text: String): Pair<List<String>, List<String>> {
-    val values = HideConfigDefaults.parseEditorText(text)
+data class ParsedHiddenTargetRules(
+    val hiddenRootEntryNames: List<String>,
+    val hiddenRelativePaths: List<String>,
+    val packageRules: List<PackageHideRule>,
+)
+
+private val packageSectionRegex = Regex("""^\[([A-Za-z0-9_.]+)]$""")
+
+private fun splitTargetValues(values: List<String>): Pair<List<String>, List<String>> {
     val rootNames = mutableListOf<String>()
     val relativePaths = mutableListOf<String>()
     values.forEach { value ->
@@ -35,6 +42,50 @@ fun parseHiddenTargetRules(text: String): Pair<List<String>, List<String>> {
         }
     }
     return rootNames to relativePaths
+}
+
+fun parseHiddenTargetRules(text: String): ParsedHiddenTargetRules {
+    val globalValues = mutableListOf<String>()
+    val packageValues = linkedMapOf<String, MutableList<String>>()
+    var currentPackage: String? = null
+    text.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("#") }
+        .forEach { line ->
+            val packageName = packageSectionRegex.matchEntire(line)?.groupValues?.get(1)
+            if (packageName != null) {
+                currentPackage = packageName
+                packageValues.getOrPut(packageName) { mutableListOf() }
+                return@forEach
+            }
+            val scopedValues = currentPackage?.let { packageValues.getOrPut(it) { mutableListOf() } }
+            if (scopedValues == null) {
+                globalValues += line
+            } else {
+                scopedValues += line
+            }
+        }
+
+    val (globalRootNames, globalRelativePaths) = splitTargetValues(globalValues.distinct())
+    val packageRules = packageValues.mapNotNull { (packageName, values) ->
+        val (rootNames, relativePaths) = splitTargetValues(values.distinct())
+        if (rootNames.isEmpty() && relativePaths.isEmpty()) {
+            null
+        } else {
+            PackageHideRule(packageName, rootNames, relativePaths)
+        }
+    }
+    return ParsedHiddenTargetRules(globalRootNames, globalRelativePaths, packageRules)
+}
+
+fun formatHiddenTargetRules(config: HideConfig): String = buildString {
+    val globalTargets = config.hiddenRootEntryNames + config.hiddenRelativePaths
+    append(HideConfigDefaults.toEditorText(globalTargets))
+    config.packageRules.forEach { rule ->
+        if (isNotEmpty()) append("\n\n")
+        append("[").append(rule.packageName).append("]\n")
+        append(HideConfigDefaults.toEditorText(rule.hiddenRootEntryNames + rule.hiddenRelativePaths))
+    }
 }
 
 fun buildAppliedConfigSnapshot(config: HideConfig): String = buildString {
@@ -52,6 +103,13 @@ fun buildAppliedConfigSnapshot(config: HideConfig): String = buildString {
     append("hiddenPackages=\n")
     if (config.hiddenPackages.isEmpty()) append("(empty)\n")
     config.hiddenPackages.forEach { append("- $it\n") }
+    append("packageRules=\n")
+    if (config.packageRules.isEmpty()) append("(empty)\n")
+    config.packageRules.forEach { rule ->
+        append("[").append(rule.packageName).append("]\n")
+        rule.hiddenRootEntryNames.forEach { append("- ").append(it).append("\n") }
+        rule.hiddenRelativePaths.forEach { append("- ").append(it).append("\n") }
+    }
 }
 
 fun buildDraftVsAppliedDiff(context: Context, draft: HideConfig, applied: HideConfig?): HideConfigDiff {
@@ -93,13 +151,15 @@ fun buildDraftVsAppliedDiff(context: Context, draft: HideConfig, applied: HideCo
         append(section("hideAllRootEntriesExemptions", draft.hideAllRootEntriesExemptions, applied.hideAllRootEntriesExemptions)).append("\n")
         append(section("hiddenRootEntryNames", draft.hiddenRootEntryNames, applied.hiddenRootEntryNames)).append("\n")
         append(section("hiddenRelativePaths", draft.hiddenRelativePaths, applied.hiddenRelativePaths)).append("\n")
-        append(section("hiddenPackages", draft.hiddenPackages, applied.hiddenPackages))
+        append(section("hiddenPackages", draft.hiddenPackages, applied.hiddenPackages)).append("\n")
+        append(section("packageRules", draft.packageRules.map { it.toString() }, applied.packageRules.map { it.toString() }))
     }
     val hasDifferences = !boolMatches ||
         draft.hideAllRootEntriesExemptions.toSet() != applied.hideAllRootEntriesExemptions.toSet() ||
         draft.hiddenRootEntryNames.toSet() != applied.hiddenRootEntryNames.toSet() ||
         draft.hiddenRelativePaths.toSet() != applied.hiddenRelativePaths.toSet() ||
-        draft.hiddenPackages.toSet() != applied.hiddenPackages.toSet()
+        draft.hiddenPackages.toSet() != applied.hiddenPackages.toSet() ||
+        draft.packageRules.toSet() != applied.packageRules.toSet()
     val summary = if (hasDifferences) {
         context.getString(R.string.diff_summary_mismatch)
     } else {

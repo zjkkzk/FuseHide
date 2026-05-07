@@ -39,6 +39,7 @@ import io.github.xiaotong6666.fusehide.config.HideConfigDefaults
 import io.github.xiaotong6666.fusehide.config.HideConfigStore
 import io.github.xiaotong6666.fusehide.config.buildAppliedConfigSnapshot
 import io.github.xiaotong6666.fusehide.config.buildDraftVsAppliedDiff
+import io.github.xiaotong6666.fusehide.config.formatHiddenTargetRules
 import io.github.xiaotong6666.fusehide.config.formatNow
 import io.github.xiaotong6666.fusehide.config.parseHiddenTargetRules
 import io.github.xiaotong6666.fusehide.debug.PathDebugActions
@@ -81,9 +82,7 @@ class MainActivity : ComponentActivity() {
         HideConfigDefaults.toEditorText(HideConfigDefaults.value.hideAllRootEntriesExemptions),
     )
     private var hiddenTargetsText by mutableStateOf(
-        HideConfigDefaults.toEditorText(
-            HideConfigDefaults.value.hiddenRootEntryNames + HideConfigDefaults.value.hiddenRelativePaths,
-        ),
+        formatHiddenTargetRules(HideConfigDefaults.value),
     )
     private var hiddenPackagesText by mutableStateOf(
         HideConfigDefaults.toEditorText(HideConfigDefaults.value.hiddenPackages),
@@ -349,18 +348,19 @@ class MainActivity : ComponentActivity() {
     private fun applyConfigToEditor(config: HideConfig) {
         enableHideAllRootEntries = config.enableHideAllRootEntries
         hideAllRootEntriesExemptionsText = HideConfigDefaults.toEditorText(config.hideAllRootEntriesExemptions)
-        hiddenTargetsText = HideConfigDefaults.toEditorText(config.hiddenRootEntryNames + config.hiddenRelativePaths)
+        hiddenTargetsText = formatHiddenTargetRules(config)
         hiddenPackagesText = HideConfigDefaults.toEditorText(config.hiddenPackages)
     }
 
     private fun currentHideConfig(): HideConfig {
-        val (rootNames, relativePaths) = parseHiddenTargetRules(hiddenTargetsText)
+        val parsedTargets = parseHiddenTargetRules(hiddenTargetsText)
         return HideConfig(
             enableHideAllRootEntries = enableHideAllRootEntries,
             hideAllRootEntriesExemptions = HideConfigDefaults.parseEditorText(hideAllRootEntriesExemptionsText),
-            hiddenRootEntryNames = rootNames,
-            hiddenRelativePaths = relativePaths,
+            hiddenRootEntryNames = parsedTargets.hiddenRootEntryNames,
+            hiddenRelativePaths = parsedTargets.hiddenRelativePaths,
             hiddenPackages = HideConfigDefaults.parseEditorText(hiddenPackagesText),
+            packageRules = parsedTargets.packageRules,
         )
     }
 

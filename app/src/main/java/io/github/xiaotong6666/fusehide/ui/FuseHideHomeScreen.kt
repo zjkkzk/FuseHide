@@ -153,7 +153,7 @@ private fun PreviewFuseHideHomeScreen() {
                 configResultsScrollToken = 0,
                 enableHideAllRootEntries = true,
                 hideAllRootEntriesExemptionsText = "Android\nDCIM\nDocument\nDownload\nMovies\nPictures",
-                hiddenTargetsText = "xinhao\nMT2",
+                hiddenTargetsText = "su\ndaemonsu\n\n[io.github.xiaotong6666.fusehide]\nxinhao\n\n[com.eltavine.duckdetector]\nMT2\nxinhao",
                 hiddenPackagesText = "com.eltavine.duckdetector\nio.github.xiaotong6666.fusehide\nio.github.a13e300.fusefixer",
             ),
             debugState = DebugUiState(

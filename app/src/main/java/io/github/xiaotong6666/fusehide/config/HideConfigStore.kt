@@ -28,6 +28,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
+import org.json.JSONArray
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -57,6 +58,9 @@ object HideConfigStore {
     private const val KEY_HIDDEN_ROOT_ENTRY_NAMES = "hidden_root_entry_names"
     private const val KEY_HIDDEN_RELATIVE_PATHS = "hidden_relative_paths"
     private const val KEY_HIDDEN_PACKAGES = "hidden_packages"
+    private const val KEY_PACKAGE_RULE_PACKAGES = "package_rule_packages"
+    private const val KEY_PACKAGE_RULE_ROOT_ENTRY_NAMES = "package_rule_root_entry_names"
+    private const val KEY_PACKAGE_RULE_RELATIVE_PATHS = "package_rule_relative_paths"
     private const val KEY_RELOAD_TOKEN = "reload_token"
     private const val KEY_SNAPSHOT_VERSION = "snapshot_version"
     private const val REQUEST_TIMEOUT_MS = 3000L
@@ -84,6 +88,7 @@ object HideConfigStore {
     fun load(context: Context): HideConfig {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val defaults = HideConfigDefaults.value
+        val packageRules = readStoredPackageRules(prefs, defaults)
         return HideConfig(
             enableHideAllRootEntries = prefs.getBoolean(
                 KEY_ENABLE_HIDE_ALL_ROOT_ENTRIES,
@@ -113,6 +118,7 @@ object HideConfigStore {
                     encodeList(defaults.hiddenPackages),
                 ),
             ),
+            packageRules = packageRules,
         )
     }
 
@@ -131,6 +137,9 @@ object HideConfigStore {
             .putString(KEY_HIDDEN_ROOT_ENTRY_NAMES, encodeList(config.hiddenRootEntryNames))
             .putString(KEY_HIDDEN_RELATIVE_PATHS, encodeList(config.hiddenRelativePaths))
             .putString(KEY_HIDDEN_PACKAGES, encodeList(config.hiddenPackages))
+            .putString(KEY_PACKAGE_RULE_PACKAGES, encodeList(config.packageRules.map { it.packageName }))
+            .putString(KEY_PACKAGE_RULE_ROOT_ENTRY_NAMES, encodeNestedList(config.packageRules.map { it.hiddenRootEntryNames }))
+            .putString(KEY_PACKAGE_RULE_RELATIVE_PATHS, encodeNestedList(config.packageRules.map { it.hiddenRelativePaths }))
             .putString(KEY_RELOAD_TOKEN, reloadToken)
             .apply()
     }
@@ -148,6 +157,9 @@ object HideConfigStore {
             .putString(KEY_HIDDEN_ROOT_ENTRY_NAMES, encodeList(config.hiddenRootEntryNames))
             .putString(KEY_HIDDEN_RELATIVE_PATHS, encodeList(config.hiddenRelativePaths))
             .putString(KEY_HIDDEN_PACKAGES, encodeList(config.hiddenPackages))
+            .putString(KEY_PACKAGE_RULE_PACKAGES, encodeList(config.packageRules.map { it.packageName }))
+            .putString(KEY_PACKAGE_RULE_ROOT_ENTRY_NAMES, encodeNestedList(config.packageRules.map { it.hiddenRootEntryNames }))
+            .putString(KEY_PACKAGE_RULE_RELATIVE_PATHS, encodeNestedList(config.packageRules.map { it.hiddenRelativePaths }))
             .putString(KEY_RELOAD_TOKEN, reloadToken)
             .putInt(KEY_SNAPSHOT_VERSION, SNAPSHOT_VERSION)
             .commit()
@@ -162,6 +174,7 @@ object HideConfigStore {
             return null
         }
         val defaults = HideConfigDefaults.value
+        val packageRules = readStoredPackageRules(prefs, defaults)
         return toBundle(
             HideConfig(
                 enableHideAllRootEntries = prefs.getBoolean(
@@ -192,6 +205,7 @@ object HideConfigStore {
                         encodeList(defaults.hiddenPackages),
                     ),
                 ),
+                packageRules = packageRules,
             ),
         ).apply {
             putString(KEY_RELOAD_TOKEN, prefs.getString(KEY_RELOAD_TOKEN, null))
@@ -208,6 +222,9 @@ object HideConfigStore {
         putStringArray(KEY_HIDDEN_ROOT_ENTRY_NAMES, config.hiddenRootEntryNames.toTypedArray())
         putStringArray(KEY_HIDDEN_RELATIVE_PATHS, config.hiddenRelativePaths.toTypedArray())
         putStringArray(KEY_HIDDEN_PACKAGES, config.hiddenPackages.toTypedArray())
+        putStringArray(KEY_PACKAGE_RULE_PACKAGES, config.packageRules.map { it.packageName }.toTypedArray())
+        putStringArray(KEY_PACKAGE_RULE_ROOT_ENTRY_NAMES, config.packageRules.map { encodeList(it.hiddenRootEntryNames) }.toTypedArray())
+        putStringArray(KEY_PACKAGE_RULE_RELATIVE_PATHS, config.packageRules.map { encodeList(it.hiddenRelativePaths) }.toTypedArray())
     }
 
     @JvmStatic
@@ -220,6 +237,11 @@ object HideConfigStore {
             hiddenRootEntryNames = bundle.getStringArray(KEY_HIDDEN_ROOT_ENTRY_NAMES)?.toList().orEmpty(),
             hiddenRelativePaths = bundle.getStringArray(KEY_HIDDEN_RELATIVE_PATHS)?.toList().orEmpty(),
             hiddenPackages = bundle.getStringArray(KEY_HIDDEN_PACKAGES)?.toList().orEmpty(),
+            packageRules = parseBundledPackageRules(
+                bundle.getStringArray(KEY_PACKAGE_RULE_PACKAGES)?.toList().orEmpty(),
+                bundle.getStringArray(KEY_PACKAGE_RULE_ROOT_ENTRY_NAMES)?.toList().orEmpty(),
+                bundle.getStringArray(KEY_PACKAGE_RULE_RELATIVE_PATHS)?.toList().orEmpty(),
+            ),
         )
     }
 
@@ -247,6 +269,9 @@ object HideConfigStore {
                 config.hiddenRootEntryNames.toTypedArray(),
                 config.hiddenRelativePaths.toTypedArray(),
                 config.hiddenPackages.toTypedArray(),
+                config.packageRules.map { it.packageName }.toTypedArray(),
+                config.packageRules.map { encodeList(it.hiddenRootEntryNames) }.toTypedArray(),
+                config.packageRules.map { encodeList(it.hiddenRelativePaths) }.toTypedArray(),
             )
             true
         } catch (t: Throwable) {
@@ -385,8 +410,69 @@ object HideConfigStore {
 
     private fun encodeList(values: List<String>): String = values.joinToString("\n")
 
+    private fun encodeNestedList(values: List<List<String>>): String = JSONArray().apply {
+        values.forEach { put(JSONArray(it)) }
+    }.toString()
+
     private fun parseStoredList(value: String?): List<String> {
         if (value.isNullOrBlank()) return emptyList()
         return HideConfigDefaults.parseEditorText(value)
+    }
+
+    private fun parseStoredPackageRules(
+        packageNamesText: String?,
+        rootNamesText: String?,
+        relativePathsText: String?,
+    ): List<PackageHideRule> = parseBundledPackageRules(
+        parseStoredList(packageNamesText),
+        parseNestedList(rootNamesText).map { encodeList(it) },
+        parseNestedList(relativePathsText).map { encodeList(it) },
+    )
+
+    private fun parseBundledPackageRules(
+        packageNames: List<String>,
+        rootNamesByPackage: List<String>,
+        relativePathsByPackage: List<String>,
+    ): List<PackageHideRule> = packageNames.mapIndexedNotNull { index, packageName ->
+        val rootNames = parseStoredList(rootNamesByPackage.getOrNull(index))
+        val relativePaths = parseStoredList(relativePathsByPackage.getOrNull(index))
+        if (packageName.isBlank() || (rootNames.isEmpty() && relativePaths.isEmpty())) {
+            null
+        } else {
+            PackageHideRule(packageName, rootNames, relativePaths)
+        }
+    }
+
+    private fun parseNestedList(value: String?): List<List<String>> {
+        if (value.isNullOrBlank()) return emptyList()
+        return try {
+            val array = JSONArray(value)
+            List(array.length()) { index ->
+                val child = array.optJSONArray(index) ?: JSONArray()
+                List(child.length()) { childIndex -> child.optString(childIndex) }
+                    .filter { it.isNotBlank() }
+            }
+        } catch (t: Throwable) {
+            Log.e("FuseHide", "parseNestedList", t)
+            emptyList()
+        }
+    }
+
+    private fun readStoredPackageRules(
+        prefs: android.content.SharedPreferences,
+        defaults: HideConfig,
+    ): List<PackageHideRule> {
+        val hasAnyStoredPackageRuleKey =
+            prefs.contains(KEY_PACKAGE_RULE_PACKAGES) ||
+                prefs.contains(KEY_PACKAGE_RULE_ROOT_ENTRY_NAMES) ||
+                prefs.contains(KEY_PACKAGE_RULE_RELATIVE_PATHS)
+        if (!hasAnyStoredPackageRuleKey) {
+            return defaults.packageRules
+        }
+        return parseStoredPackageRules(
+            prefs.getString(KEY_PACKAGE_RULE_PACKAGES, null),
+            prefs.getString(KEY_PACKAGE_RULE_ROOT_ENTRY_NAMES, null),
+            prefs.getString(KEY_PACKAGE_RULE_RELATIVE_PATHS, null),
+        )
     }
 }

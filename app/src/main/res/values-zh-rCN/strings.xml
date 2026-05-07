@@ -69,9 +69,9 @@
     <string name="field_visible_exemptions">可见例外</string>
     <string name="field_visible_exemptions_help">每行一条路径。除非您明确知道您在干什么，否则请保持 Android 可见。</string>
     <string name="field_hidden_targets">隐藏目标</string>
-    <string name="field_hidden_targets_help">每行一条路径。</string>
+    <string name="field_hidden_targets_help">每行一条路径。可用 [包名] 分段配置指定应用；第一个分段前的条目是全局配置。</string>
     <string name="field_hidden_package_names">隐藏的包名</string>
-    <string name="field_hidden_package_names_help">每行一个包名。</string>
+    <string name="field_hidden_package_names_help">每行一个包名。这些包会应用全局隐藏目标；[包名] 分段不需要再写到这里。</string>
     <string name="field_primary_path_help">供 stat、access、list、open、create、mkdir 和 unlink 使用。</string>
     <string name="field_secondary_path_help">仅供重命名/移动使用。</string>
     <string name="status_checking">模块状态：正在检查...</string>

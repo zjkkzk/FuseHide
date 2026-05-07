@@ -105,14 +105,25 @@ inline constexpr std::string_view kHideAllRootEntriesExemptions[] = {
     "Android", "DCIM", "Document", "Download", "Movies", "Pictures",
 };
 inline constexpr std::string_view kHiddenRootEntryNames[] = {
-    "xinhao",
-    "MT2",
+    "su",
+    "daemonsu",
 };
 inline constexpr std::string_view kHiddenRelativePaths[] = {};
 inline constexpr std::string_view kHiddenPackages[] = {
     "com.eltavine.duckdetector",
     "io.github.xiaotong6666.fusehide",
     "io.github.a13e300.fusefixer",
+};
+inline constexpr std::string_view kFuseHidePackageRulePackages[] = {
+    "io.github.xiaotong6666.fusehide",
+    "com.eltavine.duckdetector",
+};
+inline constexpr std::string_view kFuseHidePackageRuleRootEntries0[] = {
+    "xinhao",
+};
+inline constexpr std::string_view kFuseHidePackageRuleRootEntries1[] = {
+    "MT2",
+    "xinhao",
 };
 
 #if defined(NDEBUG)
@@ -139,12 +150,26 @@ using LowerFsDirentFilterFn = bool (*)(const dirent& entry);
 using AddDirectoryEntriesFromLowerFsFn = void (*)(DIR* dirp, LowerFsDirentFilterFn filter,
                                                   DirectoryEntries* entries);
 
+struct PackageHideRule {
+    std::string packageName;
+    std::vector<std::string> hiddenRootEntryNames;
+    std::vector<std::string> hiddenRelativePaths;
+};
+
 struct HideConfig {
     bool enableHideAllRootEntries = false;
     std::vector<std::string> hideAllRootEntriesExemptions;
     std::vector<std::string> hiddenRootEntryNames;
     std::vector<std::string> hiddenRelativePaths;
     std::vector<std::string> hiddenPackages;
+    std::vector<PackageHideRule> packageRules;
+};
+
+struct ResolvedHideRule {
+    bool enableHideAllRootEntries = false;
+    std::vector<std::string> hideAllRootEntriesExemptions;
+    std::vector<std::string> hiddenRootEntryNames;
+    std::vector<std::string> hiddenRelativePaths;
 };
 
 // These RVAs are device-specific addresses from reverse-engineered libfuse_jni.so builds.
@@ -301,7 +326,7 @@ extern std::atomic<int> gReplyErrFallbackLogCount;
 extern std::atomic<int> gErrnoRemapLogCount;
 extern std::atomic<int> gSuspiciousDirectLogCount;
 extern std::mutex gUidHideCacheMutex;
-extern std::unordered_map<uint32_t, bool> gUidHideCache;
+extern std::unordered_map<uint32_t, std::shared_ptr<const ResolvedHideRule>> gUidHideRuleCache;
 extern std::shared_ptr<const HideConfig> gHideConfig;
 
 inline bool ShouldLogLimited(std::atomic<int>& counter, int limit = 8) {
@@ -316,11 +341,14 @@ inline void DebugLogPrint(int priority, const char* fmt, Args... args) {
     }
 }
 
-std::optional<bool> ResolveShouldHideUidWithPackageManager(uint32_t uid);
+std::shared_ptr<const ResolvedHideRule> ResolveHideRuleForUid(uint32_t uid);
+std::optional<std::shared_ptr<const ResolvedHideRule>> ResolveHideRuleForUidWithPackageManager(
+    uint32_t uid);
 HideConfig DefaultHideConfig();
 std::shared_ptr<const HideConfig> CurrentHideConfig();
 void ApplyHideConfig(HideConfig config);
 bool IsHiddenPackageName(std::string_view packageName);
+std::shared_ptr<const ResolvedHideRule> RuleForAnyPackage();
 
 class UnicodePolicy final {
    public:
@@ -448,7 +476,7 @@ void ScheduleHiddenEntryInvalidation();
 void ScheduleHiddenInodeInvalidation(uint64_t ino);
 std::string InodePath(uint64_t ino);
 bool IsHiddenLookupTarget(uint32_t uid, uint64_t parent, uint32_t error_in, const char* name);
-bool IsHiddenLookupCacheTarget(uint64_t parent, const char* name);
+bool IsHiddenLookupCacheTarget(uint32_t uid, uint64_t parent, const char* name);
 
 enum class HiddenNamedTargetKind {
     None,

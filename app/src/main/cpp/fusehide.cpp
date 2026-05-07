@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "fusehide/core/state.hpp"
+#include "fusehide/policy/path_policy.hpp"
 
 namespace fusehide {
 
@@ -35,10 +36,68 @@ std::atomic<int> gReplyErrFallbackLogCount{0};
 std::atomic<int> gErrnoRemapLogCount{0};
 std::atomic<int> gSuspiciousDirectLogCount{0};
 std::mutex gUidHideCacheMutex;
-std::unordered_map<uint32_t, bool> gUidHideCache;
+std::unordered_map<uint32_t, std::shared_ptr<const ResolvedHideRule>> gUidHideRuleCache;
 std::shared_ptr<const HideConfig> gHideConfig = std::make_shared<HideConfig>(DefaultHideConfig());
 
-namespace {}  // namespace
+namespace {
+
+void AppendUnique(std::vector<std::string>* out, const std::vector<std::string>& values) {
+    for (const auto& value : values) {
+        if (std::find(out->begin(), out->end(), value) == out->end()) {
+            out->push_back(value);
+        }
+    }
+}
+
+void MergeGlobalRule(const HideConfig& config, ResolvedHideRule* out) {
+    out->enableHideAllRootEntries =
+        out->enableHideAllRootEntries || config.enableHideAllRootEntries;
+    AppendUnique(&out->hideAllRootEntriesExemptions, config.hideAllRootEntriesExemptions);
+    AppendUnique(&out->hiddenRootEntryNames, config.hiddenRootEntryNames);
+    AppendUnique(&out->hiddenRelativePaths, config.hiddenRelativePaths);
+}
+
+void MergePackageRule(const PackageHideRule& rule, ResolvedHideRule* out) {
+    AppendUnique(&out->hiddenRootEntryNames, rule.hiddenRootEntryNames);
+    AppendUnique(&out->hiddenRelativePaths, rule.hiddenRelativePaths);
+}
+
+bool RuleHasTargets(const ResolvedHideRule& rule) {
+    return rule.enableHideAllRootEntries || !rule.hiddenRootEntryNames.empty() ||
+           !rule.hiddenRelativePaths.empty();
+}
+
+void InvalidateTrackedHideTargetsForCurrentConfig() {
+    ScheduleHiddenEntryInvalidation();
+
+    std::vector<uint64_t> inodesToInvalidate;
+    {
+        std::lock_guard<std::mutex> lock(gInodePathCacheMutex);
+        inodesToInvalidate.reserve(gInodePathCache.size());
+        for (const auto& [ino, trackedPath] : gInodePathCache) {
+            if (HiddenPathPolicy::IsAnyHiddenSubtreePath(trackedPath)) {
+                inodesToInvalidate.push_back(ino);
+            }
+        }
+    }
+    for (const uint64_t ino : inodesToInvalidate) {
+        RuntimeState::ScheduleHiddenInodeInvalidation(ino);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(gHiddenSubtreeInodesMutex);
+        gHiddenSubtreeInodes.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(gRecentHiddenParentPathsMutex);
+        gRecentHiddenParentPaths.clear();
+        gRecentHiddenParentPathUids.clear();
+        gRecentHiddenParentPathAnyUid.clear();
+        gRecentHiddenParentPathAnyUidOwner = 0;
+    }
+}
+
+}  // namespace
 
 HideConfig DefaultHideConfig() {
     HideConfig config;
@@ -55,6 +114,19 @@ HideConfig DefaultHideConfig() {
     for (const auto& value : kHiddenPackages) {
         config.hiddenPackages.emplace_back(value);
     }
+    PackageHideRule fuseHideRule;
+    fuseHideRule.packageName = std::string(kFuseHidePackageRulePackages[0]);
+    for (const auto& value : kFuseHidePackageRuleRootEntries0) {
+        fuseHideRule.hiddenRootEntryNames.emplace_back(value);
+    }
+    config.packageRules.emplace_back(std::move(fuseHideRule));
+
+    PackageHideRule duckDetectorRule;
+    duckDetectorRule.packageName = std::string(kFuseHidePackageRulePackages[1]);
+    for (const auto& value : kFuseHidePackageRuleRootEntries1) {
+        duckDetectorRule.hiddenRootEntryNames.emplace_back(value);
+    }
+    config.packageRules.emplace_back(std::move(duckDetectorRule));
     return config;
 }
 
@@ -67,13 +139,17 @@ void ApplyHideConfig(HideConfig config) {
     std::atomic_store_explicit(&gHideConfig, std::move(next), std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(gUidHideCacheMutex);
-        gUidHideCache.clear();
+        gUidHideRuleCache.clear();
     }
-    DebugLogPrint(4, "applied hide config hide_all=%d exemptions=%zu roots=%zu packages=%zu",
+    InvalidateTrackedHideTargetsForCurrentConfig();
+    DebugLogPrint(4,
+                  "applied hide config hide_all=%d exemptions=%zu roots=%zu packages=%zu "
+                  "package_rules=%zu",
                   CurrentHideConfig()->enableHideAllRootEntries ? 1 : 0,
                   CurrentHideConfig()->hideAllRootEntriesExemptions.size(),
                   CurrentHideConfig()->hiddenRootEntryNames.size(),
-                  CurrentHideConfig()->hiddenPackages.size());
+                  CurrentHideConfig()->hiddenPackages.size(),
+                  CurrentHideConfig()->packageRules.size());
 }
 
 bool IsHiddenPackageName(std::string_view packageName) {
@@ -84,6 +160,29 @@ bool IsHiddenPackageName(std::string_view packageName) {
         }
     }
     return false;
+}
+
+std::shared_ptr<const ResolvedHideRule> RuleForAnyPackage() {
+    static std::mutex cacheMutex;
+    static std::shared_ptr<const HideConfig> cachedConfig;
+    static std::shared_ptr<const ResolvedHideRule> cachedRule;
+
+    const auto config = CurrentHideConfig();
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    if (cachedConfig == config) {
+        return cachedRule;
+    }
+
+    ResolvedHideRule merged;
+    MergeGlobalRule(*config, &merged);
+    for (const auto& packageRule : config->packageRules) {
+        MergePackageRule(packageRule, &merged);
+    }
+    cachedConfig = config;
+    cachedRule = RuleHasTargets(merged)
+                     ? std::make_shared<const ResolvedHideRule>(std::move(merged))
+                     : nullptr;
+    return cachedRule;
 }
 
 namespace {
@@ -121,15 +220,36 @@ JNIEnv* GetJniEnv(bool* didAttach) {
 
 }  // namespace
 
-// Query PackageManager once per uid and cache the result for hot FUSE paths.
-std::optional<bool> ResolveShouldHideUidWithPackageManager(uint32_t uid) {
+std::shared_ptr<const ResolvedHideRule> ResolveHideRuleForUid(uint32_t uid) {
+    {
+        std::lock_guard<std::mutex> lock(gUidHideCacheMutex);
+        const auto it = gUidHideRuleCache.find(uid);
+        if (it != gUidHideRuleCache.end()) {
+            return it->second;
+        }
+    }
+
+    auto resolved = ResolveHideRuleForUidWithPackageManager(uid);
+    if (!resolved.has_value()) {
+        return nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> lock(gUidHideCacheMutex);
+        gUidHideRuleCache[uid] = *resolved;
+    }
+    return *resolved;
+}
+
+// Query PackageManager once per uid and cache the merged package rule for hot FUSE paths.
+std::optional<std::shared_ptr<const ResolvedHideRule>> ResolveHideRuleForUidWithPackageManager(
+    uint32_t uid) {
     bool didAttach = false;
     JNIEnv* env = GetJniEnv(&didAttach);
     if (env == nullptr) {
         return std::nullopt;
     }
 
-    auto finish = [&](std::optional<bool> value) {
+    auto finish = [&](std::optional<std::shared_ptr<const ResolvedHideRule>> value) {
         if (didAttach) {
             gJavaVm->DetachCurrentThread();
         }
@@ -202,7 +322,8 @@ std::optional<bool> ResolveShouldHideUidWithPackageManager(uint32_t uid) {
     env->DeleteLocalRef(packageManagerClass);
     env->DeleteLocalRef(packageManager);
 
-    bool shouldHide = false;
+    auto merged = std::make_unique<ResolvedHideRule>();
+    const auto config = CurrentHideConfig();
     if (packages != nullptr) {
         const jsize count = env->GetArrayLength(packages);
         for (jsize i = 0; i < count; ++i) {
@@ -212,18 +333,29 @@ std::optional<bool> ResolveShouldHideUidWithPackageManager(uint32_t uid) {
             }
             const char* packageNameChars = env->GetStringUTFChars(packageName, nullptr);
             if (packageNameChars != nullptr) {
-                shouldHide = IsHiddenPackageName(packageNameChars);
+                const std::string_view packageNameView(packageNameChars);
+                if (IsHiddenPackageName(packageNameView)) {
+                    MergeGlobalRule(*config, merged.get());
+                }
+                for (const auto& packageRule : config->packageRules) {
+                    if (packageNameView == packageRule.packageName) {
+                        MergePackageRule(packageRule, merged.get());
+                    }
+                }
                 env->ReleaseStringUTFChars(packageName, packageNameChars);
             }
             env->DeleteLocalRef(packageName);
-            if (shouldHide) {
-                break;
-            }
         }
         env->DeleteLocalRef(packages);
     }
-    DebugLogPrint(4, "resolved uid=%u hide=%d", static_cast<unsigned>(uid), shouldHide ? 1 : 0);
-    return finish(shouldHide);
+    if (!RuleHasTargets(*merged)) {
+        DebugLogPrint(4, "resolved uid=%u hide=0", static_cast<unsigned>(uid));
+        return finish(std::shared_ptr<const ResolvedHideRule>(nullptr));
+    }
+    DebugLogPrint(4, "resolved uid=%u hide=1 roots=%zu rel=%zu hide_all=%d",
+                  static_cast<unsigned>(uid), merged->hiddenRootEntryNames.size(),
+                  merged->hiddenRelativePaths.size(), merged->enableHideAllRootEntries ? 1 : 0);
+    return finish(std::shared_ptr<const ResolvedHideRule>(merged.release()));
 }
 
 }  // namespace fusehide

@@ -35,6 +35,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import io.github.xiaotong6666.fusehide.config.HideConfig;
 import io.github.xiaotong6666.fusehide.config.HideConfigNativeBridge;
 import io.github.xiaotong6666.fusehide.config.HideConfigStore;
+import io.github.xiaotong6666.fusehide.config.PackageHideRule;
 import io.github.xiaotong6666.fusehide.status.StatusBroadcastReceiver;
 
 public class Entry implements IXposedHookLoadPackage {
@@ -64,13 +65,39 @@ public class Entry implements IXposedHookLoadPackage {
         return mainHandler;
     }
 
+    private static java.util.List<String> splitRuleLines(String value) {
+        if (value == null || value.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        final java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        for (String line : value.split("\\n")) {
+            final String trimmed = line.trim();
+            if (!trimmed.isEmpty()) {
+                out.add(trimmed);
+            }
+        }
+        return out;
+    }
+
     private static HideConfig currentNativeHideConfig() {
+        final String[] rulePackages = HideConfigNativeBridge.getCurrentPackageRulePackages();
+        final String[] ruleRoots = HideConfigNativeBridge.getCurrentPackageRuleHiddenRootEntryNames();
+        final String[] ruleRelatives = HideConfigNativeBridge.getCurrentPackageRuleHiddenRelativePaths();
+        final java.util.ArrayList<PackageHideRule> packageRules = new java.util.ArrayList<>();
+        for (int i = 0; i < rulePackages.length; i++) {
+            final java.util.List<String> roots =
+                    i < ruleRoots.length ? splitRuleLines(ruleRoots[i]) : java.util.Collections.emptyList();
+            final java.util.List<String> relatives =
+                    i < ruleRelatives.length ? splitRuleLines(ruleRelatives[i]) : java.util.Collections.emptyList();
+            packageRules.add(new PackageHideRule(rulePackages[i], roots, relatives));
+        }
         return new HideConfig(
                 HideConfigNativeBridge.getCurrentEnableHideAllRootEntries(),
                 java.util.Arrays.asList(HideConfigNativeBridge.getCurrentHideAllRootEntriesExemptions()),
                 java.util.Arrays.asList(HideConfigNativeBridge.getCurrentHiddenRootEntryNames()),
                 java.util.Arrays.asList(HideConfigNativeBridge.getCurrentHiddenRelativePaths()),
-                java.util.Arrays.asList(HideConfigNativeBridge.getCurrentHiddenPackages()));
+                java.util.Arrays.asList(HideConfigNativeBridge.getCurrentHiddenPackages()),
+                packageRules);
     }
 
     private static void sendConfigStatus(

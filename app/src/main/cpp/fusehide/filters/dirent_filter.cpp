@@ -52,7 +52,7 @@ bool ShouldFilterDirentForParentPath(uint32_t uid, std::string_view parentPath, 
         return true;
     }
     const std::string childPath = HiddenPathPolicy::JoinPathComponent(parentPath, name);
-    return HiddenPathPolicy::IsExactHiddenTargetPath(childPath);
+    return HiddenPathPolicy::IsExactHiddenTargetPath(uid, childPath);
 }
 
 bool DirentFilter::BuildFilteredDirentPayload(const char* data, size_t size, uint32_t uid,

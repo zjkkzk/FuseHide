@@ -69,9 +69,9 @@
     <string name="field_visible_exemptions">Visible exemptions</string>
     <string name="field_visible_exemptions_help">One path per line. Keep Android visible unless you know exactly what you are doing.</string>
     <string name="field_hidden_targets">Hidden targets</string>
-    <string name="field_hidden_targets_help">One path per line.</string>
+    <string name="field_hidden_targets_help">One path per line. Use [package.name] sections for app-specific targets; entries before the first section are global.</string>
     <string name="field_hidden_package_names">Hidden package names</string>
-    <string name="field_hidden_package_names_help">One package name per line.</string>
+    <string name="field_hidden_package_names_help">One package name per line. These packages receive global hidden targets; [package.name] sections work even if not listed here.</string>
     <string name="field_primary_path_help">Used by Stat, Access, List, Open, Create, Mkdir, and Unlink.</string>
     <string name="field_secondary_path_help">Used only by Rename/Move.</string>
     <string name="status_checking">Module status: checking...</string>

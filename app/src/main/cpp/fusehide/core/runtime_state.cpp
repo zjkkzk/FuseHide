@@ -183,13 +183,15 @@ void RuntimeState::ScheduleHiddenEntryInvalidation() {
     std::thread([notifyEntry, session]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         const uint64_t rootParent = gHiddenRootParentInode.load(std::memory_order_relaxed);
-        const auto config = CurrentHideConfig();
+        const auto rule = RuleForAnyPackage();
         std::unordered_set<std::string> namesToInvalidate;
-        for (const auto& rootEntryName : config->hiddenRootEntryNames) {
-            namesToInvalidate.emplace(rootEntryName);
+        if (rule != nullptr) {
+            for (const auto& rootEntryName : rule->hiddenRootEntryNames) {
+                namesToInvalidate.emplace(rootEntryName);
+            }
         }
 
-        if (config->enableHideAllRootEntries) {
+        if (rule != nullptr && rule->enableHideAllRootEntries) {
             for (const auto& rootPath : kVisibleStorageRoots) {
                 DIR* dir = opendir(std::string(rootPath).c_str());
                 if (dir == nullptr) {
@@ -262,26 +264,32 @@ bool IsHiddenLookupTarget(uint32_t uid, uint64_t parent, uint32_t error_in, cons
     if (!IsTestHiddenUid(uid) || error_in != 0 || name == nullptr) {
         return false;
     }
-    if (IsHiddenLookupCacheTarget(parent, name)) {
+    if (IsHiddenLookupCacheTarget(uid, parent, name)) {
         return true;
     }
     const auto kind = ClassifyHiddenNamedTarget(uid, parent, name);
     return kind == HiddenNamedTargetKind::Root || kind == HiddenNamedTargetKind::Descendant;
 }
 
-bool IsHiddenLookupCacheTarget(uint64_t parent, const char* name) {
+bool IsHiddenLookupCacheTarget(uint32_t uid, uint64_t parent, const char* name) {
     if (name == nullptr) {
         return false;
     }
+    const auto rule = ResolveHideRuleForUid(uid);
+    if (rule == nullptr) {
+        return false;
+    }
     const uint64_t rootParent = gHiddenRootParentInode.load(std::memory_order_relaxed);
-    if (ShouldHideWildcardRootEntryByParent(parent, rootParent, name)) {
+    if (rootParent != 0 && parent == rootParent && rule->enableHideAllRootEntries &&
+        IsWildcardRootEntryCandidate(name)) {
         return true;
     }
-    return HiddenPathPolicy::IsConfiguredHiddenRootEntryName(name) &&
+    return HiddenPathPolicy::IsConfiguredHiddenRootEntryName(uid, name) &&
            (rootParent == 0 || parent == rootParent);
 }
 
-std::optional<HiddenNamedTargetKind> ClassifyHiddenNamedTargetByTrackedPath(uint64_t parent,
+std::optional<HiddenNamedTargetKind> ClassifyHiddenNamedTargetByTrackedPath(uint32_t uid,
+                                                                            uint64_t parent,
                                                                             const char* name) {
     if (name == nullptr) {
         return std::nullopt;
@@ -291,10 +299,10 @@ std::optional<HiddenNamedTargetKind> ClassifyHiddenNamedTargetByTrackedPath(uint
         return std::nullopt;
     }
     const std::string childPath = HiddenPathPolicy::JoinPathComponent(*parentPath, name);
-    if (HiddenPathPolicy::IsExactHiddenTargetPath(childPath)) {
+    if (HiddenPathPolicy::IsExactHiddenTargetPath(uid, childPath)) {
         return HiddenNamedTargetKind::Root;
     }
-    if (HiddenPathPolicy::IsAnyHiddenSubtreePath(childPath)) {
+    if (HiddenPathPolicy::IsAnyHiddenSubtreePath(uid, childPath)) {
         return HiddenNamedTargetKind::Descendant;
     }
     return std::nullopt;
@@ -310,14 +318,19 @@ HiddenNamedTargetKind ClassifyHiddenNamedTarget(uint32_t uid, uint64_t parent, c
     if (parent != 0 && parent != rootParent && IsTrackedHiddenSubtreeInode(parent)) {
         return HiddenNamedTargetKind::Descendant;
     }
-    if (ShouldHideWildcardRootEntryByParent(parent, rootParent, name)) {
+    const auto rule = ResolveHideRuleForUid(uid);
+    if (rule == nullptr) {
+        return HiddenNamedTargetKind::None;
+    }
+    if (parent == rootParent && rule->enableHideAllRootEntries &&
+        IsWildcardRootEntryCandidate(name)) {
         return HiddenNamedTargetKind::Root;
     }
-    if (HiddenPathPolicy::IsConfiguredHiddenRootEntryName(name) &&
+    if (HiddenPathPolicy::IsConfiguredHiddenRootEntryName(uid, name) &&
         (rootParent == 0 || parent == rootParent)) {
         return HiddenNamedTargetKind::Root;
     }
-    if (const auto trackedPathKind = ClassifyHiddenNamedTargetByTrackedPath(parent, name);
+    if (const auto trackedPathKind = ClassifyHiddenNamedTargetByTrackedPath(uid, parent, name);
         trackedPathKind.has_value()) {
         return *trackedPathKind;
     }
