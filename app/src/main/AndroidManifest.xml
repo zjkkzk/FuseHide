@@ -30,7 +30,7 @@
             android:resource="@array/scope" />
 
         <activity
-            android:name="io.github.xiaotong6666.fusehide.MainActivity"
+            android:name="io.github.xiaotong6666.fusehide.ui.MainActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -40,12 +40,12 @@
         </activity>
 
         <provider
-            android:name="io.github.xiaotong6666.fusehide.HideConfigProvider"
+            android:name="io.github.xiaotong6666.fusehide.config.HideConfigProvider"
             android:authorities="io.github.xiaotong6666.fusehide.hideconfig"
             android:exported="true" />
 
         <receiver
-            android:name="io.github.xiaotong6666.fusehide.HideConfigRequestReceiver"
+            android:name="io.github.xiaotong6666.fusehide.config.HideConfigRequestReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="io.github.xiaotong6666.fusehide.REQUEST_HIDE_CONFIG" />

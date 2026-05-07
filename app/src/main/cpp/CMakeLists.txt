@@ -6,15 +6,15 @@ add_library(
     fusehide
     SHARED
     fusehide.cpp
-    fusehide/unicode_policy.cpp
-    fusehide/path_policy.cpp
-    fusehide/runtime_state.cpp
-    fusehide/dirent_filter.cpp
-    fusehide/fuse_wrappers.cpp
-    fusehide/reply_buf_filter.cpp
-    fusehide/elf_utils.cpp
-    fusehide/hook_install.cpp
-    fusehide/jni_entry.cpp
+    fusehide/core/runtime_state.cpp
+    fusehide/elf/elf_utils.cpp
+    fusehide/filters/dirent_filter.cpp
+    fusehide/filters/reply_buf_filter.cpp
+    fusehide/hooks/fuse_wrappers.cpp
+    fusehide/hooks/hook_install.cpp
+    fusehide/jni/jni_entry.cpp
+    fusehide/policy/path_policy.cpp
+    fusehide/policy/unicode_policy.cpp
     third_party/xz-embedded/xz_dec_stream.c
     third_party/xz-embedded/xz_dec_lzma2.c
     third_party/xz-embedded/xz_crc32.c
@@ -31,7 +31,12 @@ target_compile_options(
     -fvisibility=hidden
 )
 
-target_include_directories(fusehide PRIVATE third_party/xz-embedded)
+target_include_directories(
+    fusehide
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    third_party/xz-embedded
+)
 
 find_library(log-lib log)
 find_library(dl-lib dl)

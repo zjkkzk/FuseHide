@@ -72,7 +72,7 @@ fun DualActionRow(
             Button(
                 onClick = onPrimaryClick,
                 modifier = Modifier.weight(1f).height(56.dp),
-                colors = ButtonDefaults.buttonColors().copy(MiuixTheme.colorScheme.secondary),
+                colors = ButtonDefaults.buttonColors().copy(color = MiuixTheme.colorScheme.secondary),
             ) {
                 Text(primaryLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, style = MiuixTheme.textStyles.button.copy(fontWeight = FontWeight.Medium))
             }
@@ -80,7 +80,7 @@ fun DualActionRow(
         Button(
             onClick = onSecondaryClick,
             modifier = Modifier.weight(1f).height(56.dp),
-            colors = ButtonDefaults.buttonColors().copy(MiuixTheme.colorScheme.secondary),
+            colors = ButtonDefaults.buttonColors().copy(color = MiuixTheme.colorScheme.secondary),
         ) {
             Text(secondaryLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, style = MiuixTheme.textStyles.button.copy(fontWeight = FontWeight.Medium))
         }
@@ -101,7 +101,7 @@ fun ActionGrid(actions: List<GridActionItem>) {
                 Button(
                     onClick = item.action,
                     modifier = Modifier.weight(1f).height(56.dp),
-                    colors = ButtonDefaults.buttonColors().copy(currentBgColor),
+                    colors = ButtonDefaults.buttonColors().copy(color = currentBgColor),
                     insideMargin = PaddingValues(horizontal = 12.dp, vertical = 14.dp),
                 ) {
                     Text(
