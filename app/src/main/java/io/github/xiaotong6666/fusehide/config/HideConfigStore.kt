@@ -283,6 +283,7 @@ object HideConfigStore {
                 config.packageRules.map { encodeList(it.hiddenRootEntryNames) }.toTypedArray(),
                 config.packageRules.map { encodeList(it.hiddenRelativePaths) }.toTypedArray(),
             )
+            Log.i("FuseHide", buildAppliedConfigSnapshot(config))
             true
         } catch (t: Throwable) {
             Log.e("FuseHide", "applyBundleToNative", t)
